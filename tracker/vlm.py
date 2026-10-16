@@ -23,7 +23,9 @@ import argparse
 import base64
 import io
 import json
+import queue
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -150,6 +152,7 @@ class HFBackend:
 
         v = cfg["vlm"]
         self.cfg, self.batch_size, self.max_new_tokens = cfg, v["batch_size"], v["max_new_tokens"]
+        self.verbose = True
         kwargs = dict(dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32, device_map="auto")
         if v.get("quantize") in ("4bit", "8bit"):
             from transformers import BitsAndBytesConfig
@@ -175,7 +178,7 @@ class HFBackend:
         import torch
 
         out = []
-        for i in tqdm(range(0, len(queries), self.batch_size), desc="vlm"):
+        for i in tqdm(range(0, len(queries), self.batch_size), desc="vlm", disable=not self.verbose):
             batch = [self._messages(q) for q in queries[i:i + self.batch_size]]
             inputs = self.processor.apply_chat_template(batch, add_generation_prompt=True, tokenize=True,
                                                         return_dict=True, return_tensors="pt", padding=True)
@@ -197,6 +200,7 @@ class OpenAIBackend:
         self.url = v["base_url"].rstrip("/") + "/chat/completions"
         self.model, self.concurrency, self.max_new_tokens = v["model"], v["concurrency"], v["max_new_tokens"]
         self.headers = {"Authorization": f"Bearer {v.get('api_key') or 'EMPTY'}"}
+        self.verbose = True
 
     def _one(self, q: Query) -> str:
         images = [{"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(b).decode()}}
@@ -217,7 +221,7 @@ class OpenAIBackend:
 
     def __call__(self, queries: list[Query]) -> list[str]:
         with ThreadPoolExecutor(self.concurrency) as pool:
-            return list(tqdm(pool.map(self._one, queries), total=len(queries), desc="vlm"))
+            return list(tqdm(pool.map(self._one, queries), total=len(queries), desc="vlm", disable=not self.verbose))
 
 
 BACKENDS = {"hf": HFBackend, "openai": OpenAIBackend}
@@ -294,6 +298,59 @@ def run_vlm(cfg: dict, video: Path, limit: int | None = None, save_samples: int 
     print(f"saved {path.name}: {len(df)} answers in {elapsed:.0f}s ({len(df) / max(elapsed, 1e-6):.2f}/s), "
           f"unparsed {df.state.isna().sum()}, states {df.state.value_counts().to_dict()}")
     return path
+
+
+class LiveVLM:
+    """VLM decisions for the live view, computed on a background thread so the video never waits.
+
+    Call observe() every frame. It keeps a few recent crops per visible worker and, every interval_s, queues a
+    query. Answers are appended to `self.decisions` ({track_id: (times, states, confidences)}), which the
+    engine reads as its external classifier. Decisions arrive with the model's latency; the engine holds the
+    latest one for vlm.live_hold_s and falls back to motion when there is none.
+    """
+
+    def __init__(self, cfg: dict):
+        self.cfg, v = cfg, cfg["vlm"]
+        self.backend = BACKENDS[v["backend"]](cfg)
+        self.backend.verbose = False
+        self.decisions: dict[int, tuple[list, list, list]] = {}
+        self.crops: dict[int, list[tuple[float, bytes]]] = {}   # recent crops per track
+        self.next_query: dict[int, float] = {}
+        self.pending: set[int] = set()
+        self.queue: queue.Queue = queue.Queue()
+        self.crop_every = v["clip_s"] / max(v["n_frames"] - 1, 1)
+        threading.Thread(target=self._worker, daemon=True).start()
+
+    def observe(self, frame: np.ndarray, tracks, t: float) -> None:
+        v = self.cfg["vlm"]
+        for tr in tracks:
+            tid = tr.track_id
+            buf = self.crops.setdefault(tid, [])
+            if not buf or t - buf[-1][0] >= self.crop_every - 1e-3:
+                buf.append((t, _jpeg(_crop(frame, tr.box, v["crop_margin"], v["crop_size"]))))
+                del buf[:-v["n_frames"]]
+            if t >= self.next_query.get(tid, tr.first_t + min(v["clip_s"], 1.0)) and tid not in self.pending:
+                q = Query(tid, t, [], [_jpeg(_context(frame, tr.box, v["context_width"]), 85)] + [b for _, b in buf])
+                self.pending.add(tid)
+                self.next_query[tid] = t + v["interval_s"]
+                self.queue.put(q)
+
+    def _worker(self):
+        while True:
+            batch = [self.queue.get()]
+            while not self.queue.empty() and len(batch) < self.cfg["vlm"]["batch_size"]:
+                batch.append(self.queue.get())
+            try:
+                answers = self.backend(batch)
+            except Exception as e:  # keep the live view running; motion covers the gap
+                print(f"VLM error: {e}")
+                answers = [""] * len(batch)
+            for q, a in zip(batch, answers):
+                state, conf, _ = parse_answer(a)
+                if state:
+                    times, states, confs = self.decisions.get(q.track_id, ([], [], []))
+                    self.decisions[q.track_id] = (times + [q.t], states + [state], confs + [conf])  # atomic swap
+                self.pending.discard(q.track_id)
 
 
 def main():

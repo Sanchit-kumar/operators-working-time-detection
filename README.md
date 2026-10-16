@@ -154,6 +154,7 @@ the sack pile in video B) without zones. Detection and tracking are the same as 
 | `configs/vlm.yaml` | this laptop (8 GB GPU), in-process | Qwen3-VL-2B-Instruct (4.3 GB) |
 | `configs/vlm_a100.yaml` | A100, in-process (simplest) | Qwen3-VL-8B-Instruct (17.5 GB); 32B on an 80 GB card |
 | `configs/vlm_server.yaml` | A100 + vLLM server (fastest) | Qwen3-VL-8B-Instruct |
+| `configs/vlm_live.yaml` | live view + background VLM | as `vlm.yaml` (point it at the 8B / server on the A100) |
 
 ```bash
 # quick check: 20 queries spread over the video, and save what the model sees to outputs/<video>/vlm_samples/
@@ -164,6 +165,9 @@ python -m tracker.run "$A" "$B" --config configs/vlm.yaml
 
 # re-run only the VLM (e.g. after changing the prompt); predictions are stored per model name
 python -m tracker.vlm "$A" "$B" --config configs/vlm.yaml
+
+# live view with VLM decisions computed in the background (video never waits; motion covers gaps)
+python -m tracker.live "$B" --config configs/vlm_live.yaml
 
 # benchmark against your labels: no tuning involved, so all labelled data is a fair test
 python -m tracker.benchmark "$A" "$B" --config configs/vlm.yaml

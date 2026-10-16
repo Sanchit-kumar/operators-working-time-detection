@@ -1,0 +1,11 @@
+# Live view with zero-shot VLM decisions (background thread) and the fast detector.
+# On the A100 machine, point vlm.* at the 8B model or the vLLM server (see vlm_a100.yaml / vlm_server.yaml).
+extends: vlm.yaml
+
+detector:
+  model: yolo11s-pose.pt
+  imgsz: auto
+
+vlm:
+  batch_size: 8
+  live_hold_s: 6.0          # keep showing the latest VLM decision this long (model latency)

@@ -5,6 +5,7 @@
     python -m tracker.live 0                          # webcam
     python -m tracker.live data/video.mp4 --save outputs/live.mp4 --no-show
     python -m tracker.live rtsp://cam/stream --zones line3    # work zones from zones/line3.json
+    python -m tracker.live data/video.mp4 --config configs/vlm_live.yaml   # zero-shot VLM decisions (background)
 
 Work zones default to zones/<video name>.json for files (see tools/zone_tool.py).
 
@@ -70,7 +71,14 @@ def main():
     is_file = isinstance(src, str) and not src.startswith(("rtsp", "http"))
     zone_name = a.zones or (Path(src).stem if is_file else None)
     zones = load_zones(cfg, zone_name, int(cap.get(3)), int(cap.get(4))) if zone_name else None
-    engine = ActivityEngine(cfg, frame_dt=stride / fps_src, zones=zones)
+    vlm = None
+    if cfg["classifier"].get("mode") == "vlm":  # zero-shot VLM decisions, computed in the background
+        from .vlm import LiveVLM
+
+        vlm = LiveVLM(cfg)
+    engine = ActivityEngine(cfg, frame_dt=stride / fps_src, zones=zones, external=vlm.decisions if vlm else None)
+    if vlm:
+        engine.ext_hold = cfg["vlm"].get("live_hold_s", 6.0)  # answers arrive with the model's latency
     reader = cap if is_file else LatestFrameReader(cap)  # files: every frame; streams: newest frame
 
     writer, debug, idx, fps, n_done = None, False, 0, 0.0, 0
@@ -85,6 +93,8 @@ def main():
         # Files use the video clock; streams use the wall clock.
         t = idx / fps_src if is_file else time.time() - tic
         visible = engine.update(det(frame, idx, t))
+        if vlm:
+            vlm.observe(frame, visible, t)
         idx += 1
         n_done += 1
 
