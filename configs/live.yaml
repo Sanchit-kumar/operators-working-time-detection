@@ -1,0 +1,6 @@
+# Real-time settings: only what differs from the parent config.
+# After tuning, change `extends` to tuned.yaml so the live view uses the fitted thresholds.
+extends: default.yaml
+
+detector:
+  model: yolo11s-pose.pt   # ~2x faster inference than yolo11m-pose on the RTX 4060

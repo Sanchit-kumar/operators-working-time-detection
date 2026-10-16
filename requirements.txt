@@ -1,0 +1,10 @@
+# PyTorch must match the NVIDIA driver (this machine: driver supports CUDA 12.4):
+#   pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
+ultralytics>=8.4
+opencv-python
+lap
+pandas
+pyarrow
+pyyaml
+tqdm
+pytest

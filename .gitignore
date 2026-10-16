@@ -1,0 +1,6 @@
+.venv/
+outputs/
+__pycache__/
+*.pt
+*.engine
+data/
