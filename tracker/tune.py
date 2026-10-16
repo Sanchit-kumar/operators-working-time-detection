@@ -22,6 +22,7 @@ GRID = {
     "classifier.body_thr": [0.05, 0.1, 0.2, 0.35],
     "classifier.idle_after_s": [1.5, 3.0, 5.0],
     "features.min_track_s": [0.5, 1.5, 3.0],
+    "features.min_track_conf": [0.2, 0.3, 0.4, 0.5],  # low-res cameras give weak but real detections
 }
 
 

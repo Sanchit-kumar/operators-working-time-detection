@@ -19,11 +19,13 @@ def zones_path(cfg: dict, name: str) -> Path:
 
 
 def load_zones(cfg: dict, name: str, width: int, height: int) -> list[np.ndarray] | None:
-    """Pixel polygons for this video/camera, or None when no zone file exists (whole frame counts)."""
+    """Pixel polygons for this video/camera, or None when there are no zones (whole frame counts)."""
     path = zones_path(cfg, name)
     if not path.exists():
         return None
-    zones = json.loads(path.read_text())["zones"]
+    zones = json.loads(path.read_text()).get("zones", [])
+    if not zones:  # an empty zone file (tool opened and closed without drawing) means no restriction
+        return None
     return [(np.array(z["points"], np.float32) * [width, height]).astype(np.float32) for z in zones]
 
 

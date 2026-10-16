@@ -45,7 +45,8 @@ it against human-labelled ground truth, and show it live. See README.md for the 
   `labels/<video>.csv` with one row per worker per second: `second,track_id,x1,y1,x2,y2,state`
   (`state` in working/idle/ignore). The benchmark matches GT to predictions by box IoU, not track id.
 - Results: `outputs/<video>/timeline.csv` (`track_id,start_s,end_s,state`) and `summary.json`.
-- Splits: first 60 % of each video = dev (tuning), last 40 % = test.
+- Splits: first 60 % of each video's labelled time span = dev (tuning), last 40 % = test.
+- An empty zone file means no restriction (whole frame). Classifier = rule-based thresholds (tracker/engine.py), tuned by grid search.
 - `configs/live.yaml` / `moving_camera.yaml` extend `default.yaml` (configs support `extends:`).
 - Work zones: `zones/<video stem or camera name>.json`, normalised polygons, drawn with `tools/zone_tool.py`.
   A person counts only when the bottom-centre of their box is inside a zone. No file = whole frame.

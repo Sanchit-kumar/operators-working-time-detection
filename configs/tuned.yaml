@@ -14,14 +14,14 @@ motion:
   kpt_conf: 0.4
 features:
   window_s: 2.0
-  min_track_s: 0.5
-  min_track_conf: 0.5
+  min_track_s: 3.0
+  min_track_conf: 0.2
   max_gap_s: 1.0
 classifier:
-  energy_thr: 0.04
+  energy_thr: 0.02
   wrist_thr: 0.05
-  body_thr: 0.1
-  idle_after_s: 1.5
+  body_thr: 0.05
+  idle_after_s: 5.0
   work_after_s: 0.5
 zones:
   dir: zones

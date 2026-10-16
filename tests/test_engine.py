@@ -98,3 +98,12 @@ def test_people_outside_zones_are_not_counted():
         for i in range(int(5 * FPS)):
             engine.update(make_frame(i, 0.3))
         assert len(engine.workers()) == expected
+
+
+def test_empty_zone_file_means_whole_frame(tmp_path):
+    from tracker.zones import load_zones
+
+    cfg = load_config()
+    cfg["zones"]["dir"] = str(tmp_path)
+    (tmp_path / "cam.json").write_text('{"zones": []}')
+    assert load_zones(cfg, "cam", 640, 360) is None

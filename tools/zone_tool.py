@@ -63,6 +63,10 @@ def main():
     cv2.setMouseCallback("zones", on_mouse)
 
     def save():
+        if not zones:  # don't leave an empty file behind
+            path.unlink(missing_ok=True)
+            print("no zones drawn: whole frame counts")
+            return
         path.write_text(json.dumps({"zones": zones}, indent=1))
         print(f"saved {len(zones)} zone(s) to {path}")
 

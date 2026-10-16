@@ -26,7 +26,7 @@ from .detect import load_cache
 from .engine import ActivityEngine, engine_for_cache
 
 MISSED = "missed"
-DEV_FRACTION = 0.6  # first 60 % of each video is the dev (tuning) split, the rest is test
+DEV_FRACTION = 0.6  # first 60 % of each video's LABELLED time span is the dev (tuning) split, the rest is test
 
 
 def replay(cfg: dict, cache: Path, record: bool = False) -> ActivityEngine:
@@ -36,10 +36,11 @@ def replay(cfg: dict, cache: Path, record: bool = False) -> ActivityEngine:
     return engine
 
 
-def split_window(cache: Path, split: str) -> tuple[float, float]:
-    meta = json.loads((cache / "meta.json").read_text())
-    dur = meta["frames"] / meta["fps"]
-    return {"all": (0, dur), "dev": (0, dur * DEV_FRACTION), "test": (dur * DEV_FRACTION, dur)}[split]
+def split_window(gt: pd.DataFrame, split: str) -> tuple[float, float]:
+    """Time window of a split, over the labelled span (videos are often labelled only partly)."""
+    lo, hi = float(gt.second.min()), float(gt.second.max()) + 1
+    cut = lo + (hi - lo) * DEV_FRACTION
+    return {"all": (lo, hi), "dev": (lo, cut), "test": (cut, hi)}[split]
 
 
 def iou(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -58,33 +59,45 @@ def state_at(track, t: float) -> str | None:
     return None
 
 
-def match_predictions(engine: ActivityEngine, gt: pd.DataFrame, det: pd.DataFrame) -> pd.DataFrame:
-    """Add a `pred` column to the ground truth: the state of the predicted worker covering each GT box."""
-    workers = {tr.track_id: tr for tr in engine.workers()}
+def match_tracks(gt: pd.DataFrame, det: pd.DataFrame) -> pd.Series:
+    """For each GT row, the predicted track id whose box overlaps it in that second (-1 if none).
+
+    Depends only on detections, not on classifier settings, so it is computed once per video.
+    """
     det = det.assign(second=det.t.astype(int))
-    preds = []
+    by_sec = {sec: d for sec, d in det.groupby("second")}
+    matched = {}
     for sec, g in gt.groupby("second"):
-        d = det[det.second == sec]
-        if len(d):  # each predicted track's box closest to the middle of the second (tracks may drop frames)
-            d = d.loc[(d.t - (sec + 0.5)).abs().groupby(d.track_id).idxmin()]
+        d = by_sec.get(sec)
+        if d is None:
+            matched.update({i: -1 for i in g.index})
+            continue
+        d = d.loc[(d.t - (sec + 0.5)).abs().groupby(d.track_id).idxmin()]  # each track's box nearest mid-second
         boxes, ids = d[["x1", "y1", "x2", "y2"]].to_numpy(), d.track_id.to_numpy()
         used = set()
         for r in g.itertuples():
-            pred = MISSED
-            if len(boxes):
-                ious = iou(np.array([r.x1, r.y1, r.x2, r.y2]), boxes)
-                for j in np.argsort(-ious):
-                    if ious[j] < 0.3:
-                        break
-                    if ids[j] in used:
-                        continue
-                    used.add(ids[j])
-                    tr = workers.get(int(ids[j]))
-                    pred = (state_at(tr, sec + 0.5) if tr else None) or MISSED
+            matched[r.Index] = -1
+            ious = iou(np.array([r.x1, r.y1, r.x2, r.y2]), boxes)
+            for j in np.argsort(-ious):
+                if ious[j] < 0.3:
                     break
-            preds.append((r.Index, pred))
+                if ids[j] not in used:
+                    used.add(ids[j])
+                    matched[r.Index] = int(ids[j])
+                    break
+    return pd.Series(matched, dtype=int).reindex(gt.index)
+
+
+def match_predictions(engine: ActivityEngine, gt: pd.DataFrame) -> pd.DataFrame:
+    """Add a `pred` column to the ground truth: the state of the predicted worker covering each GT box.
+
+    gt must have a `pred_track` column (from match_tracks)."""
+    workers = {tr.track_id: tr for tr in engine.workers()}
     out = gt.copy()
-    out["pred"] = pd.Series(dict(preds))
+    out["pred"] = [
+        (state_at(workers[tid], sec + 0.5) if tid in workers else None) or MISSED
+        for tid, sec in zip(gt.pred_track, gt.second)
+    ]
     return out
 
 
@@ -113,20 +126,22 @@ def metrics(df: pd.DataFrame) -> dict:
 
 
 @lru_cache(maxsize=None)
-def _load(cache: Path, stem: str) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Ground truth and detections, loaded once per video (the tuner evaluates hundreds of times)."""
-    return pd.read_csv(ROOT / "labels" / f"{stem}.csv"), pd.read_parquet(cache / "detections.parquet")
+def _load(cache: Path, stem: str) -> pd.DataFrame:
+    """Ground truth matched to predicted tracks, once per video (the tuner evaluates thousands of times)."""
+    gt = pd.read_csv(ROOT / "labels" / f"{stem}.csv")
+    gt["pred_track"] = match_tracks(gt, pd.read_parquet(cache / "detections.parquet"))
+    return gt
 
 
 def evaluate(cfg: dict, videos: list[Path], split: str = "all", engines: dict | None = None) -> tuple[dict, pd.DataFrame]:
     frames = []
     for v in videos:
         cache = output_dir(cfg, v)
-        gt, det = _load(cache, v.stem)
-        t0, t1 = split_window(cache, split)
+        gt = _load(cache, v.stem)
+        t0, t1 = split_window(gt, split)
         gt = gt[(gt.second >= t0) & (gt.second + 1 <= t1 + 1e-6)]
         engine = engines[v] if engines else replay(cfg, cache)
-        m = match_predictions(engine, gt, det)
+        m = match_predictions(engine, gt)
         m["video"] = v.name
         frames.append(m)
     df = pd.concat(frames, ignore_index=True)
