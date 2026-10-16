@@ -15,12 +15,22 @@ import yaml
 from .benchmark import evaluate, replay
 from .config import ROOT, load_config, output_dir
 
+# "section.key": candidate values. Only stage-2 settings: they are re-applied without re-extracting features.
 GRID = {
-    "energy_thr": [0.02, 0.04, 0.06, 0.09, 0.13],
-    "wrist_thr": [0.1, 0.18, 0.25, 0.4, 0.6],
-    "body_thr": [0.1, 0.2, 0.35],
-    "idle_after_s": [1.5, 3.0, 5.0],
+    "classifier.energy_thr": [0.01, 0.02, 0.04, 0.06, 0.09],
+    "classifier.wrist_thr": [0.05, 0.1, 0.18, 0.25, 0.4],
+    "classifier.body_thr": [0.05, 0.1, 0.2, 0.35],
+    "classifier.idle_after_s": [1.5, 3.0, 5.0],
+    "features.min_track_s": [0.5, 1.5, 3.0],
 }
+
+
+def apply(cfg: dict, params: dict) -> dict:
+    cfg = copy.deepcopy(cfg)
+    for key, value in params.items():
+        section, name = key.split(".")
+        cfg[section][name] = value
+    return cfg
 
 
 def objective(res: dict) -> tuple:
@@ -42,9 +52,9 @@ def main():
     keys = list(GRID)
     combos = list(itertools.product(*GRID.values()))
     for i, values in enumerate(combos, 1):
-        cfg = copy.deepcopy(base)
-        cfg["classifier"].update(dict(zip(keys, values)))
+        cfg = apply(base, dict(zip(keys, values)))
         for e in engines.values():
+            e.f = cfg["features"]
             e.reclassify(cfg["classifier"])
         res, _ = evaluate(cfg, a.videos, "dev", engines)
         results.append((objective(res), dict(zip(keys, values)), res))
@@ -55,8 +65,7 @@ def main():
     for obj, params, res in results[:5]:
         print(f"  macro-F1 {res['macro_f1']}  working err {res['working_time']['err_pct']}%  {params}")
 
-    best = copy.deepcopy(base)
-    best["classifier"].update(results[0][1])
+    best = apply(base, results[0][1])
     test, _ = evaluate(best, a.videos, "test")
     print(f"\nBest params on TEST: macro-F1 {test['macro_f1']}  accuracy {test['accuracy']}  "
           f"working err {test['working_time']['err_pct']}%  idle err {test['idle_time']['err_pct']}%")
