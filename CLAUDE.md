@@ -31,8 +31,9 @@ it against human-labelled ground truth, and show it live. See README.md for the 
 - States in scope: **Working** and **Idle**. Absent is out of scope for now.
 
 ## State definitions (source of truth — labels, rules and metrics all follow these)
-- **Working**: worker is doing a task: handling/carrying items, pulling the pallet jack, walking with purpose
-  between stations, operating equipment, **using the tablet/scanner (even when standing still)**, packing.
+- **Working**: worker is doing **any kind of task** (user decision, 2026-10-16): computer/desk work, packing,
+  sorting, handling/carrying items, pulling a pallet jack, walking with purpose between stations, operating
+  equipment, using a tablet/scanner (even when standing or sitting still).
 - **Idle**: worker is visible but not doing a task for >= `classifier.idle_after_s` (standing with empty hands, sitting,
   on a personal phone, chatting, waiting).
 - Ambiguous cases are decided here, in writing, before labelling. Update this section when a rule changes.
