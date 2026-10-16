@@ -63,7 +63,7 @@ def draw(img: np.ndarray, visible: list[Track], engine: ActivityEngine, fps: flo
             lines = [f"#{tr.track_id} new"]
         if debug and tr.signals:
             sg = tr.signals
-            lines.append(f"e{sg['energy']:.2f} w{sg['wrist']:.2f} b{sg['body']:.2f}")
+            lines.append(f"vlm: {sg['ext']}" if sg.get("ext") else f"e{sg['energy']:.2f} w{sg['wrist']:.2f} b{sg['body']:.2f}")
         sizes = [cv2.getTextSize(t, cv2.FONT_HERSHEY_SIMPLEX, fs, 1)[0] for t in lines]
         tw, lh = max(w for w, _ in sizes), max(h for _, h in sizes) + int(5 * fs / 0.42)
         bh = lh * len(lines) + 4

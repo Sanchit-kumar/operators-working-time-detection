@@ -1,0 +1,6 @@
+# A100 (40/80 GB), model loaded in this process. First run downloads ~17.5 GB from Hugging Face.
+extends: vlm.yaml
+
+vlm:
+  model: Qwen/Qwen3-VL-8B-Instruct   # 80 GB: Qwen/Qwen3-VL-32B-Instruct (bf16, ~67 GB) for the best accuracy
+  batch_size: 16

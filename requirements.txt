@@ -8,3 +8,8 @@ pyarrow
 pyyaml
 tqdm
 pytest
+
+# VLM classifier (classifier.mode: vlm)
+transformers>=4.57
+accelerate
+# optional: bitsandbytes (vlm.quantize 4bit/8bit), vllm (fast serving on a big GPU, separate env recommended)

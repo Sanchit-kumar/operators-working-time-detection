@@ -13,11 +13,12 @@ against human labels, and shows it live.
 | 1. Detection + pose | **YOLO11x-pose** (batch) / YOLO11s-pose (live): person boxes + 17 body keypoints | `tracker/detect.py` |
 | 2. Tracking | **BoT-SORT** with ReID: a stable ID per worker | `configs/botsort.yaml` |
 | 3. Motion features | per worker, measured over 0.2 s (fps-independent): pixel **motion energy** in the box, **wrist speed** relative to the body, **body speed** | `tracker/motion.py`, `tracker/engine.py` |
-| 4. Classifier | **rule-based threshold classifier**: *working* if any feature (2 s median) exceeds its threshold, else *idle*; a hysteresis state machine removes flicker | `tracker/engine.py` |
+| 4a. Classifier (motion) | **rule-based threshold classifier**: *working* if any feature (2 s median) exceeds its threshold, else *idle*; a hysteresis state machine removes flicker | `tracker/engine.py` |
+| 4b. Classifier (VLM, zero-shot) | **Qwen3-VL** looks at each worker every 2 s (context frame + 4 crops) and answers working / idle / not-a-person from the written definitions; no training or tuning | `tracker/vlm.py` |
 | 5. Tuning | grid search of the thresholds against human labels (first 60 % of each video's labelled time), reported on the last 40 % | `tracker/tune.py` |
 
-The classifier is not a trained neural network: it is a small set of thresholds fitted to your labels. A learned
-classifier (on pose sequences / person crops) is the planned next step once enough labelled video exists.
+Two classifiers, chosen by config: the **motion** classifier (thresholds fitted to your labels, `configs/tuned.yaml`)
+and the **zero-shot VLM** classifier (`configs/vlm*.yaml`, section 7), which needs no labels or tuning.
 
 Current tuned thresholds (`configs/tuned.yaml`, fitted on videos A + B): energy 0.02, wrist 0.05, body 0.05
 body-heights/s, idle after 5 s, minimum track 3 s, minimum mean detection confidence 0.2.
@@ -140,6 +141,58 @@ python -m tracker.benchmark "$A" --split test                                   
 Only labelled videos can be passed to `tune` / `benchmark`. Reported: per-second accuracy, precision / recall / F1
 per state, macro-F1, confusion matrix, and the headline **total working / idle time error** (overall and per
 worker). Results are also saved to `outputs/benchmark_<split>.json`.
+
+## 7. Zero-shot VLM classifier (Qwen3-VL)
+
+Every 2 s, for every tracked person, the VLM gets one full frame with the person in a red box plus 4 close-up
+crops from the last 2 s, and answers `{"state": working | idle | not_a_person, "confidence", "reason"}`. The
+definitions live in the prompt (`tracker/vlm.py`, `USER_PROMPT`). `not_a_person` removes false detections (e.g.
+the sack pile in video B) without zones. Detection and tracking are the same as before (the cache is reused).
+
+| Config | Where | Model |
+|---|---|---|
+| `configs/vlm.yaml` | this laptop (8 GB GPU), in-process | Qwen3-VL-2B-Instruct (4.3 GB) |
+| `configs/vlm_a100.yaml` | A100, in-process (simplest) | Qwen3-VL-8B-Instruct (17.5 GB); 32B on an 80 GB card |
+| `configs/vlm_server.yaml` | A100 + vLLM server (fastest) | Qwen3-VL-8B-Instruct |
+
+```bash
+# quick check: 20 queries spread over the video, and save what the model sees to outputs/<video>/vlm_samples/
+python -m tracker.vlm "$A" --config configs/vlm.yaml --limit 20 --save-samples 20
+
+# full run: VLM predictions (if missing) + report + annotated video (overlay shows "vlm: <state>")
+python -m tracker.run "$A" "$B" --config configs/vlm.yaml
+
+# re-run only the VLM (e.g. after changing the prompt); predictions are stored per model name
+python -m tracker.vlm "$A" "$B" --config configs/vlm.yaml
+
+# benchmark against your labels: no tuning involved, so all labelled data is a fair test
+python -m tracker.benchmark "$A" "$B" --config configs/vlm.yaml
+python -m tracker.benchmark "$A" "$B" --config configs/tuned.yaml        # motion classifier, for comparison
+```
+
+### On the A100 machine
+
+```bash
+git clone <this repo> && cd worker-activity-tracker
+python3 -m venv .venv && source .venv/bin/activate
+pip install torch torchvision                     # pick the build matching that machine's CUDA driver
+pip install -r requirements.txt
+mkdir -p data && cp /path/to/videos/*.mp4 data/   # videos are not in git
+
+# Option 1, in-process (downloads the model on first use)
+python -m tracker.run data/*.mp4 --config configs/vlm_a100.yaml
+python -m tracker.benchmark "$A" "$B" --config configs/vlm_a100.yaml
+
+# Option 2, vLLM server (faster). Terminal 1:
+pip install vllm
+vllm serve Qwen/Qwen3-VL-8B-Instruct --max-model-len 16384 --limit-mm-per-prompt '{"image": 8}'
+# Terminal 2:
+python -m tracker.run data/*.mp4 --config configs/vlm_server.yaml
+```
+
+To reuse detections computed elsewhere, copy `outputs/<video>/{detections.parquet,camera.parquet,meta.json}`
+along with the video. Labels are in git (`labels/`), so the benchmark works there directly. For larger models,
+change `vlm.model` (e.g. `Qwen/Qwen3-VL-32B-Instruct` on an 80 GB A100, or `quantize: 4bit` on smaller GPUs).
 
 ## 6. Tests
 

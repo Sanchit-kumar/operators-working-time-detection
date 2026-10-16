@@ -60,11 +60,20 @@ class Track:
 
 
 class ActivityEngine:
-    def __init__(self, cfg: dict, frame_dt: float, record: bool = False, zones: list[np.ndarray] | None = None):
+    def __init__(self, cfg: dict, frame_dt: float, record: bool = False, zones: list[np.ndarray] | None = None,
+                 external: dict | None = None):
         """record=True keeps every track's feature history so reclassify() can try new thresholds cheaply.
-        zones: pixel polygons (see tracker/zones.py); people outside them are not counted."""
+        zones: pixel polygons (see tracker/zones.py); people outside them are not counted.
+        external: per-track decisions from another classifier (the VLM, see tracker/vlm.py):
+            {track_id: (decision times, states, confidences)}. Used instead of the motion thresholds where
+            available; "not_a_person" removes the box from the counts."""
         self.record = record
         self.zones = zones
+        self.external = external
+        vlm = cfg.get("vlm", {})
+        self.ext_hold = vlm.get("interval_s", 2.0)       # a decision covers the clip before it and holds this long
+        self.ext_clip = vlm.get("clip_s", 2.0)
+        self.ext_min_conf = vlm.get("min_confidence", 0.0)
         self.outside: list[np.ndarray] = []  # boxes of people outside the work zones in the last frame
         self.f = cfg["features"]
         self.c = cfg["classifier"]
@@ -84,7 +93,8 @@ class ActivityEngine:
         for i, tid in enumerate(d.ids):
             tid = int(tid)
             box, kpts = d.boxes[i], d.kpts[i]
-            if not in_zones(box, self.zones):
+            ext = self.external_state(tid, d.t)
+            if not in_zones(box, self.zones) or ext == "not_a_person":
                 self.outside.append(box)
                 continue
             tr = self.tracks.get(tid)
@@ -104,8 +114,8 @@ class ActivityEngine:
             energy, wrist, body = np.median(np.array([x[1:] for x in tr.history]), axis=0)
             ready = len(tr.history) >= 3  # wait for a few samples before the first decision
             if self.record:
-                tr.log.append((d.t, energy, wrist, body, ready, gap))
-            self._step(tr, d.t, energy, wrist, body, ready, gap)
+                tr.log.append((d.t, energy, wrist, body, ready, gap, ext))
+            self._step(tr, d.t, energy, wrist, body, ready, gap, ext)
             visible.append(tr)
         return visible
 
@@ -114,8 +124,22 @@ class ActivityEngine:
         self.c = classifier_cfg
         for tr in self.tracks.values():
             tr.state, tr.pending, tr.segments = None, None, []
-            for t, energy, wrist, body, ready, gap in tr.log:
-                self._step(tr, t, energy, wrist, body, ready, gap)
+            for t, energy, wrist, body, ready, gap, ext in tr.log:
+                self._step(tr, t, energy, wrist, body, ready, gap, ext)
+
+    def external_state(self, tid: int, t: float) -> str | None:
+        """The external (VLM) decision covering time t for this track, or None (fall back to motion)."""
+        if not self.external or tid not in self.external:
+            return None
+        times, states, confs = self.external[tid]
+        j = int(np.searchsorted(times, t))  # first decision at or after t: its clip contains t
+        if j < len(times) and times[j] - t <= self.ext_clip:
+            k = j
+        elif j > 0 and t - times[j - 1] <= self.ext_hold:  # otherwise hold the previous decision
+            k = j - 1
+        else:
+            return None
+        return states[k] if confs[k] >= self.ext_min_conf else None
 
     def workers(self) -> list[Track]:
         """Tracks that count as workers: long and confident enough (filters brief false detections)."""
@@ -179,15 +203,18 @@ class ActivityEngine:
         return wrist, body
 
     def _step(self, tr: Track, t: float, energy: float, wrist: float, body: float, ready: bool,
-              gap: float) -> None:
+              gap: float, ext: str | None = None) -> None:
         """Threshold the windowed signals and advance the track's Working/Idle state machine.
 
         gap: seconds since this track was last seen. Time while unseen (occluded, outside the zone) is not
         counted: the open segment stays closed where the track was last seen and a new one starts now.
         """
         score = max(energy / self.c["energy_thr"], wrist / self.c["wrist_thr"], body / self.c["body_thr"])
-        tr.signals = dict(energy=energy, wrist=wrist, body=body, score=score)
-        raw = WORKING if score >= 1.0 else IDLE
+        tr.signals = dict(energy=energy, wrist=wrist, body=body, score=score, ext=ext)
+        if ext in (WORKING, IDLE):  # external (VLM) decision takes precedence over the motion thresholds
+            raw, ready = ext, True
+        else:
+            raw = WORKING if score >= 1.0 else IDLE
 
         if tr.state is None:
             if ready:
@@ -217,4 +244,11 @@ def engine_for_cache(cfg: dict, cache: Path, record: bool = False) -> ActivityEn
     """An engine set up for a video's detection cache (frame timing from meta.json, zones by video name)."""
     meta = json.loads((cache / "meta.json").read_text())
     zones = load_zones(cfg, cache.name, meta["width"], meta["height"])
-    return ActivityEngine(cfg, frame_dt=meta["stride"] / meta["fps"], record=record, zones=zones)
+    external = None
+    if cfg["classifier"].get("mode", "motion") == "vlm":
+        from .vlm import load_predictions, predictions_path
+
+        external = load_predictions(cfg, cache)
+        if external is None:
+            raise FileNotFoundError(f"No VLM predictions {predictions_path(cfg, cache)}: run python -m tracker.vlm first")
+    return ActivityEngine(cfg, frame_dt=meta["stride"] / meta["fps"], record=record, zones=zones, external=external)

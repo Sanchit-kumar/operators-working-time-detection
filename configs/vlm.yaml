@@ -1,0 +1,31 @@
+# Zero-shot VLM classifier (no tuning). Local test setup: small model, in-process (fits an 8 GB GPU).
+# For the A100 machine use configs/vlm_a100.yaml (in-process) or configs/vlm_server.yaml (vLLM server).
+extends: default.yaml
+
+classifier:
+  mode: vlm                 # VLM decisions replace the motion thresholds (motion is the fallback)
+  idle_after_s: 3.0         # idle needs ~2 consecutive idle answers (definition: idle >= 3 s)
+  work_after_s: 0.5
+
+features:
+  min_track_s: 1.5
+  min_track_conf: 0.2       # the VLM rejects non-people itself ("not_a_person"), so keep weak detections
+
+vlm:
+  backend: hf               # hf = transformers in this process | openai = OpenAI-compatible server (vLLM)
+  model: Qwen/Qwen3-VL-2B-Instruct
+  quantize: none            # none | 4bit | 8bit (bitsandbytes; for big models on small GPUs)
+  batch_size: 4
+  max_new_tokens: 64
+  interval_s: 2.0           # one decision per worker every 2 s
+  clip_s: 2.0               # each decision looks at the last 2 s
+  n_frames: 4               # close-up crops per decision (plus one context frame)
+  crop_size: 384            # longer side of each crop, px
+  crop_margin: 0.25         # context around the box (hands, table, items), fraction of box size
+  context_width: 768        # full frame with the red box, px
+  min_track_s: 1.0          # don't query tracks shorter than this
+  min_confidence: 0.0       # ignore VLM answers below this confidence (fall back to motion)
+  # openai backend only
+  base_url: http://localhost:8000/v1
+  api_key: EMPTY
+  concurrency: 16

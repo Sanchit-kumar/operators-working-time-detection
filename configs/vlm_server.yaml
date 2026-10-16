@@ -1,0 +1,11 @@
+# Fastest on an A100: serve the model with vLLM, then this pipeline sends requests to it.
+#   pip install vllm
+#   vllm serve Qwen/Qwen3-VL-8B-Instruct --max-model-len 16384 --limit-mm-per-prompt '{"image": 8}'
+# `model` must match the served model name. base_url can point to another machine (http://<gpu-host>:8000/v1).
+extends: vlm.yaml
+
+vlm:
+  backend: openai
+  model: Qwen/Qwen3-VL-8B-Instruct
+  base_url: http://localhost:8000/v1
+  concurrency: 32

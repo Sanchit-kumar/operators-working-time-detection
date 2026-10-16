@@ -88,6 +88,11 @@ def main():
         out = output_dir(cfg, video)
         if a.redetect or not (out / "detections.parquet").exists():
             detect_stage(cfg, video, out)
+        if cfg["classifier"].get("mode") == "vlm":
+            from .vlm import predictions_path, run_vlm
+
+            if a.redetect or not predictions_path(cfg, out).exists():
+                run_vlm(cfg, video)
         s = classify_stage(cfg, video, out, cfg["output"]["save_video"] and not a.no_video)
         results.append(s)
         print(f"\n{video.name}: {s['workers']} workers | working {s['working_s']}s | idle {s['idle_s']}s | "
