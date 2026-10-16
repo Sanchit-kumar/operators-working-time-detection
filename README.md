@@ -18,7 +18,7 @@ against human labels, and shows it live.
 | 5. Tuning | grid search of the thresholds against human labels (first 60 % of each video's labelled time), reported on the last 40 % | `tracker/tune.py` |
 
 Two classifiers, chosen by config: the **motion** classifier (thresholds fitted to your labels, `configs/tuned.yaml`)
-and the **zero-shot VLM** classifier (`configs/vlm*.yaml`, section 7), which needs no labels or tuning.
+and the **zero-shot VLM** classifier (`configs/vlm*.yaml`, section 6), which needs no labels or tuning.
 
 Current tuned thresholds (`configs/tuned.yaml`, fitted on videos A + B): energy 0.02, wrist 0.05, body 0.05
 body-heights/s, idle after 5 s, minimum track 3 s, minimum mean detection confidence 0.2.
@@ -142,7 +142,7 @@ Only labelled videos can be passed to `tune` / `benchmark`. Reported: per-second
 per state, macro-F1, confusion matrix, and the headline **total working / idle time error** (overall and per
 worker). Results are also saved to `outputs/benchmark_<split>.json`.
 
-## 7. Zero-shot VLM classifier (Qwen3-VL)
+## 6. Zero-shot VLM classifier (Qwen3-VL)
 
 Every 2 s, for every tracked person, the VLM gets one full frame with the person in a red box plus 4 close-up
 crops from the last 2 s, and answers `{"state": working | idle | not_a_person, "confidence", "reason"}`. The
@@ -194,7 +194,7 @@ To reuse detections computed elsewhere, copy `outputs/<video>/{detections.parque
 along with the video. Labels are in git (`labels/`), so the benchmark works there directly. For larger models,
 change `vlm.model` (e.g. `Qwen/Qwen3-VL-32B-Instruct` on an 80 GB A100, or `quantize: 4bit` on smaller GPUs).
 
-## 6. Tests
+## 7. Tests
 
 ```bash
 pytest -q
