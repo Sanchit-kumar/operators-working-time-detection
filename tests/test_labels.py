@@ -42,3 +42,10 @@ def test_undo_and_persistence(tmp_path):
     assert Labels(path).state(1, 5) == "working"  # saved immediately
     assert L.undo() and L.state(1, 5) is None
     assert not L.undo()
+
+
+def test_accept_suggestion_is_one_undo_step(tmp_path):
+    L = Labels(tmp_path / "l.json")
+    L.paint_many(1, [(0.0, 5.0, "working"), (5.0, 9.0, "idle"), (9.0, 12.0, "working")])
+    assert [L.state(1, t) for t in (2, 6, 10)] == ["working", "idle", "working"]
+    assert L.undo() and L.state(1, 2) is None and L.state(1, 10) is None

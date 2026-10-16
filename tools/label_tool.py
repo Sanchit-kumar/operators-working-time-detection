@@ -20,8 +20,12 @@ Keys
   tab          select the next worker on screen
   z            zoom the lanes: 20 s / 1 min / 5 min / whole video
   u            undo (any number of steps)
-  n            jump to the next worker that still has unlabelled time
+  n            jump to the next worker that still has unlabelled time (tracks >= --min-len seconds)
+  c            accept the suggestion for the selected worker (with --suggest)
   h            show / hide help              q       save and quit
+
+--suggest pre-draws the model's predictions (top half of each lane, configs/tuned.yaml if it exists). They are
+only suggestions: nothing counts as a label until you accept it with c or paint over it.
 
 Every edit is saved immediately to labels/<video>.json; labels/<video>.csv (read by the benchmark) is written on
 quit. Re-open the tool any time to continue or correct.
@@ -57,7 +61,7 @@ HELP = [
     "click a box = select worker      drag on a lane = paint range with brush",
     "w / i / x = brush + label from now     W / I / X = label whole track",
     "space play   a/d 1s   j/l 10s   ,/. frame   click overview = jump",
-    "u undo   n next unlabelled   z zoom lanes   +/- speed   h help   q quit",
+    "u undo   n next unlabelled   c accept suggestion   z zoom   +/- speed   h help   q quit",
 ]
 
 
@@ -113,6 +117,13 @@ class Labels:
         self.version += 1
         self.save()
 
+    def paint_many(self, tid: int, segments: list[tuple[float, float, str]]) -> None:
+        """Apply several (start, end, state) segments as one undoable edit."""
+        for i, (t0, t1, state) in enumerate(segments):
+            self.paint(tid, t0, t1, state)
+            if i:  # merge the checkpoints into one undo step
+                self.history.pop()
+
     def save(self) -> None:
         self.path.write_text(json.dumps({str(k): v for k, v in self.points.items()}, indent=1))
 
@@ -163,6 +174,29 @@ def export_csv(labels: Labels, det: pd.DataFrame, out: Path) -> int:
     return len(rows)
 
 
+def load_suggestions(cache: Path) -> dict[int, list[tuple[float, float, str]]]:
+    """Model predictions per track (stage 2 replayed from the detection cache), as suggested segments."""
+    from tracker.benchmark import replay
+
+    cfg_path = ROOT / "configs/tuned.yaml"
+    cfg = load_config(cfg_path) if cfg_path.exists() else load_config()
+    cfg = {**cfg, "features": {**cfg["features"], "min_track_s": 0.0, "min_track_conf": 0.0}}  # suggest for all
+    print(f"computing suggestions with {cfg_path.name if cfg_path.exists() else 'default.yaml'} ...")
+    engine = replay(cfg, cache)
+    return {tr.track_id: [(s.start, s.end, s.state) for s in tr.segments] for tr in engine.tracks.values()}
+
+
+def suggested(suggestions: dict, tid: int, t: float) -> str | None:
+    for t0, t1, state in suggestions.get(tid, []):
+        if t0 <= t < t1:
+            return state
+    return None
+
+
+def faded(color) -> tuple:
+    return tuple(int(c * 0.45 + 70) for c in color)
+
+
 def fmt(t: float) -> str:
     return f"{int(t // 60):02d}:{t % 60:04.1f}"
 
@@ -170,6 +204,9 @@ def fmt(t: float) -> str:
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("video", type=Path)
+    p.add_argument("--suggest", action="store_true", help="pre-draw model predictions to accept or correct")
+    p.add_argument("--min-len", type=float, default=2.0,
+                   help="tracks shorter than this (s) are left out of the to-do list / n (they're <3%% of time)")
     p.add_argument("--width", type=int, default=1152, help="display width of the video (smaller if the window is too tall)")
     a = p.parse_args()
 
@@ -185,6 +222,7 @@ def main():
 
     (ROOT / "labels").mkdir(exist_ok=True)
     labels = Labels(ROOT / "labels" / f"{a.video.stem}.json")
+    suggestions = load_suggestions(cache) if a.suggest else {}
     rd = FrameReader(a.video, a.width)
     W, Hv = rd.size
     dur = rd.n / rd.fps
@@ -222,6 +260,8 @@ def main():
             return todo_cache[labels.version]
         out = []
         for tid, (t0, t1) in life.iterrows():
+            if t1 - 0.5 - t0 < a.min_len:  # tiny fragments: optional to label
+                continue
             ts = np.arange(t0, t1, 0.5)
             if any(labels.state(int(tid), x) is None for x in ts):
                 out.append((t0, int(tid)))
@@ -286,7 +326,8 @@ def main():
             st["boxes"].append((tid, b))
             lab = labels.state(tid, t)
             sel = tid == st["selected"]
-            cv2.rectangle(view, tuple(b[:2]), tuple(b[2:]), COLORS[lab], 3 if sel else 1)
+            color = COLORS[lab] if lab else faded(COLORS[suggested(suggestions, tid, t)])
+            cv2.rectangle(view, tuple(b[:2]), tuple(b[2:]), color, 3 if sel else 1)
             txt = f"#{tid}" + ("" if lab else " ?")
             org = (int(b[0]), int(max(b[1] - 4, 12)))
             cv2.putText(view, txt, org, cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 3, cv2.LINE_AA)
@@ -326,6 +367,9 @@ def main():
                 if t0 <= tx <= t1:
                     lab = labels.state(tid, tx)
                     panel[y:y + LANE_H - 3, x:x + 2] = COLORS[lab] if lab else UNLABELLED
+                    sug = None if lab else suggested(suggestions, tid, tx)
+                    if sug:  # suggestion: top half of the lane, faded
+                        panel[y:y + (LANE_H - 3) // 2, x:x + 2] = faded(COLORS[sug])
             if st["drag"] and st["drag"][0] == tid:
                 xa, xb = sorted((lane_t_to_x(st["drag"][1]), lane_t_to_x(st["drag"][2])))
                 cv2.rectangle(panel, (xa, y), (xb, y + LANE_H - 4), COLORS[st["brush"]], 2)
@@ -369,6 +413,12 @@ def main():
             st["brush"] = WHOLE_KEYS[k]
             labels.paint(sel, life.loc[sel, "min"], life.loc[sel, "max"], st["brush"])
             st["msg"] = f"#{sel} whole track = {NAMES[st['brush']]}"
+        elif k == ord("c") and sel is not None:
+            if suggestions.get(sel):
+                labels.paint_many(sel, suggestions[sel])
+                st["msg"] = f"#{sel} suggestion accepted"
+            else:
+                st["msg"] = f"no suggestion for #{sel}: label it with W / I / X"
         elif k == ord("u"):
             st["msg"] = "undone" if labels.undo() else "nothing to undo"
         elif k == ord("n"):
