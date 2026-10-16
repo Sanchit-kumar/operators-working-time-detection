@@ -4,3 +4,6 @@ __pycache__/
 *.pt
 *.engine
 data/
+temp.py
+temp.ipynb
+*.part

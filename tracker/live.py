@@ -4,6 +4,9 @@
     python -m tracker.live rtsp://user:pass@cam/stream
     python -m tracker.live 0                          # webcam
     python -m tracker.live data/video.mp4 --save outputs/live.mp4 --no-show
+    python -m tracker.live rtsp://cam/stream --zones line3    # work zones from zones/line3.json
+
+Work zones default to zones/<video name>.json for files (see tools/zone_tool.py).
 
 Keys: q quit, space pause, d toggle debug signals.
 """
@@ -11,12 +14,14 @@ Keys: q quit, space pause, d toggle debug signals.
 import argparse
 import threading
 import time
+from pathlib import Path
 
 import cv2
 
 from .config import ROOT, load_config
 from .detect import Detector
 from .engine import ActivityEngine
+from .zones import load_zones
 from .render import draw
 
 
@@ -53,6 +58,7 @@ def main():
     p.add_argument("--save", default=None, help="also write the annotated stream to this .mp4")
     p.add_argument("--no-show", action="store_true")
     p.add_argument("--display-width", type=int, default=1280)
+    p.add_argument("--zones", default=None, help="zone file name in zones/ (default: the video's name)")
     a = p.parse_args()
     cfg = load_config(a.config)
 
@@ -61,8 +67,10 @@ def main():
     fps_src = cap.get(cv2.CAP_PROP_FPS) or 25.0
     stride = cfg["detector"]["vid_stride"]
     det = Detector(cfg)
-    engine = ActivityEngine(cfg, frame_dt=stride / fps_src)
     is_file = isinstance(src, str) and not src.startswith(("rtsp", "http"))
+    zone_name = a.zones or (Path(src).stem if is_file else None)
+    zones = load_zones(cfg, zone_name, int(cap.get(3)), int(cap.get(4))) if zone_name else None
+    engine = ActivityEngine(cfg, frame_dt=stride / fps_src, zones=zones)
     reader = cap if is_file else LatestFrameReader(cap)  # files: every frame; streams: newest frame
 
     writer, debug, idx, fps, n_done = None, False, 0, 0.0, 0

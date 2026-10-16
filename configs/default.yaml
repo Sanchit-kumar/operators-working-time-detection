@@ -1,23 +1,27 @@
 # Worker activity tracker configuration. All tunable values live here.
 
 detector:
-  model: yolo11m-pose.pt        # yolo11s-pose.pt if real-time FPS is too low
-  tracker: configs/botsort.yaml # BoT-SORT with camera-motion compensation
-  imgsz: 1280                   # overhead factory cameras -> small people; keep resolution high
-  conf: 0.35
+  model: yolo11x-pose.pt        # most accurate; finds far / occluded / low-res workers that smaller models miss
+  tracker: configs/botsort.yaml # BoT-SORT multi-object tracker with ReID
+  imgsz: 1920                   # high: small far-away workers; low-res video is upscaled (helps recall). or auto
+  conf: 0.1                     # low on purpose: BoT-SORT starts tracks only from confident detections
+                                # (new_track_thresh) but uses weak ones to keep existing tracks alive
   device: 0                     # GPU index, or "cpu"
   quantize: 16                  # FP16 on GPU (ultralytics >= 8.4; replaces the old `half` flag)
   vid_stride: 1                 # process every Nth frame (2 halves the cost on 15-min videos)
 
 motion:
-  work_width: 640               # frame width used for camera-motion estimation and frame differencing
+  fixed_camera: true            # factory CCTV; set false for moving cameras (configs/moving_camera.yaml)
+  work_width: 960               # frame width used for camera-motion estimation and frame differencing
   diff_threshold: 18            # grey-level change counted as "motion" after camera compensation
+  interval_s: 0.2               # motion is measured over this interval, so thresholds don't depend on fps
   kpt_conf: 0.4                 # minimum keypoint confidence for wrist/body motion
 
 features:
   window_s: 2.0                 # sliding window over which motion is averaged
   min_track_s: 3.0              # tracks shorter than this are ignored (brief false positives)
   min_track_conf: 0.5           # tracks with lower mean detection confidence are ignored
+  max_gap_s: 1.0                # a track unseen for longer (occluded / left the zone) does not accrue time
 
 classifier:
   # A worker is "working" when any normalised activity signal is above its threshold.
@@ -26,6 +30,9 @@ classifier:
   body_thr: 0.20                # body-centre speed, in body-heights per second
   idle_after_s: 3.0             # low activity must last this long before switching to idle
   work_after_s: 0.5             # high activity must last this long before switching to working
+
+zones:
+  dir: zones                    # zones/<video name>.json from tools/zone_tool.py; no file = whole frame counts
 
 output:
   dir: outputs

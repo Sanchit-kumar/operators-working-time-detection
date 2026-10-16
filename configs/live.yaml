@@ -3,4 +3,5 @@
 extends: default.yaml
 
 detector:
-  model: yolo11s-pose.pt   # ~2x faster inference than yolo11m-pose on the RTX 4060
+  model: yolo11s-pose.pt   # fast enough for real time on the RTX 4060
+  imgsz: auto

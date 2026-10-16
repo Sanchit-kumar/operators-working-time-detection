@@ -1,0 +1,5 @@
+# For moving / handheld cameras (e.g. data/warehouse_high_resolution.mp4).
+extends: default.yaml
+
+motion:
+  fixed_camera: false

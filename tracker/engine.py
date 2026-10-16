@@ -3,13 +3,17 @@
 Runs online (one frame at a time), so the same code drives batch processing, the benchmark and the live view.
 """
 
+import json
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 
 from . import IDLE, WORKING
 from .detect import FrameDetections
+from .motion import nearest_in_time, to3x3
+from .zones import in_zones, load_zones
 
 L_WRIST, R_WRIST = 9, 10
 BODY_KPTS = [5, 6, 11, 12]  # shoulders and hips
@@ -35,13 +39,14 @@ class Track:
     n_obs: int = 0
     box: np.ndarray = None
     kpts: np.ndarray = None
-    history: deque = field(default_factory=deque)  # (t, energy, wrist_speed, body_speed)
+    history: deque = field(default_factory=deque)  # (t, energy, wrist_speed, body_speed) over window_s
+    past: deque = field(default_factory=deque)     # (t, kpts, box, camera_cum) over ~2 x motion interval
     state: str | None = None
     pending: str | None = None
     pending_since: float = 0.0
     segments: list[Segment] = field(default_factory=list)
     signals: dict = field(default_factory=dict)  # latest windowed features, for display/debug
-    log: list = field(default_factory=list)      # (t, energy, wrist, body, ready) per frame, when recording
+    log: list = field(default_factory=list)      # (t, energy, wrist, body, ready, gap) per frame, when recording
 
     def totals(self) -> dict[str, float]:
         out = {WORKING: 0.0, IDLE: 0.0}
@@ -55,12 +60,17 @@ class Track:
 
 
 class ActivityEngine:
-    def __init__(self, cfg: dict, frame_dt: float, record: bool = False):
-        """record=True keeps every track's feature history so reclassify() can try new thresholds cheaply."""
+    def __init__(self, cfg: dict, frame_dt: float, record: bool = False, zones: list[np.ndarray] | None = None):
+        """record=True keeps every track's feature history so reclassify() can try new thresholds cheaply.
+        zones: pixel polygons (see tracker/zones.py); people outside them are not counted."""
         self.record = record
+        self.zones = zones
+        self.outside: list[np.ndarray] = []  # boxes of people outside the work zones in the last frame
         self.f = cfg["features"]
         self.c = cfg["classifier"]
         self.kpt_conf = cfg["motion"]["kpt_conf"]
+        self.interval = cfg["motion"]["interval_s"]
+        self.cum = np.eye(3)  # cumulative camera transform (first frame -> current), full-res pixels
         self.dt = frame_dt
         self.tracks: dict[int, Track] = {}
         self.t = 0.0
@@ -69,14 +79,22 @@ class ActivityEngine:
 
     def update(self, d: FrameDetections) -> list[Track]:
         self.t = d.t
-        visible = []
+        self.cum = to3x3(d.affine) @ self.cum
+        visible, self.outside = [], []
         for i, tid in enumerate(d.ids):
             tid = int(tid)
+            box, kpts = d.boxes[i], d.kpts[i]
+            if not in_zones(box, self.zones):
+                self.outside.append(box)
+                continue
             tr = self.tracks.get(tid)
             if tr is None:
-                tr = self.tracks[tid] = Track(tid, first_t=d.t)
-            box, kpts = d.boxes[i], d.kpts[i]
-            wrist, body = self._speeds(tr, box, kpts, d.affine, d.t)
+                tr = self.tracks[tid] = Track(tid, first_t=d.t, last_t=d.t)
+            gap = d.t - tr.last_t
+            wrist, body = self._speeds(tr, box, kpts, d.t)
+            tr.past.append((d.t, kpts, box, self.cum.copy()))
+            while len(tr.past) > 2 and tr.past[1][0] <= d.t - 2 * self.interval:
+                tr.past.popleft()
             tr.history.append((d.t, float(d.energy[i]), wrist, body))
             while tr.history and tr.history[0][0] < d.t - self.f["window_s"]:
                 tr.history.popleft()
@@ -86,8 +104,8 @@ class ActivityEngine:
             energy, wrist, body = np.median(np.array([x[1:] for x in tr.history]), axis=0)
             ready = len(tr.history) >= 3  # wait for a few samples before the first decision
             if self.record:
-                tr.log.append((d.t, energy, wrist, body, ready))
-            self._step(tr, d.t, energy, wrist, body, ready)
+                tr.log.append((d.t, energy, wrist, body, ready, gap))
+            self._step(tr, d.t, energy, wrist, body, ready, gap)
             visible.append(tr)
         return visible
 
@@ -96,8 +114,8 @@ class ActivityEngine:
         self.c = classifier_cfg
         for tr in self.tracks.values():
             tr.state, tr.pending, tr.segments = None, None, []
-            for t, energy, wrist, body, ready in tr.log:
-                self._step(tr, t, energy, wrist, body, ready)
+            for t, energy, wrist, body, ready, gap in tr.log:
+                self._step(tr, t, energy, wrist, body, ready, gap)
 
     def workers(self) -> list[Track]:
         """Tracks that count as workers: long and confident enough (filters brief false detections)."""
@@ -132,14 +150,18 @@ class ActivityEngine:
 
     # ---------- internals ----------
 
-    def _speeds(self, tr: Track, box, kpts, affine, t) -> tuple[float, float]:
-        """Wrist and body speed in body-sizes per second, camera-compensated."""
-        if tr.kpts is None or t - tr.last_t > 3 * self.dt:
+    def _speeds(self, tr: Track, box, kpts, t) -> tuple[float, float]:
+        """Wrist and body speed in body-sizes per second, measured over ~interval_s and camera-compensated."""
+        if not tr.past:
             return 0.0, 0.0
-        dt = t - tr.last_t
+        t_ref, kpts_ref, box_ref, cum_ref = nearest_in_time(tr.past, t - self.interval)
+        dt = t - t_ref
+        if dt <= 0 or dt > 3 * self.interval:  # track was not seen recently: no reliable reference
+            return 0.0, 0.0
+        warp = (self.cum @ np.linalg.inv(cum_ref))[:2]  # reference frame -> current frame (camera motion only)
         scale = max(box[2] - box[0], box[3] - box[1], 1.0)
-        prev = apply_affine(affine, tr.kpts[:, :2])  # where the previous keypoints would be if only the camera moved
-        ok = (kpts[:, 2] > self.kpt_conf) & (tr.kpts[:, 2] > self.kpt_conf)
+        prev = apply_affine(warp, kpts_ref[:, :2])
+        ok = (kpts[:, 2] > self.kpt_conf) & (kpts_ref[:, 2] > self.kpt_conf)
         disp = np.linalg.norm(kpts[:, :2] - prev, axis=1) / scale / dt
 
         wrists = [disp[k] for k in (L_WRIST, R_WRIST) if ok[k]]
@@ -150,14 +172,19 @@ class ActivityEngine:
             body = float(np.mean(disp[body_ok]))
         else:  # fall back to box centre
             c_now = np.array([(box[0] + box[2]) / 2, (box[1] + box[3]) / 2])
-            c_prev = apply_affine(affine, np.array([[(tr.box[0] + tr.box[2]) / 2, (tr.box[1] + tr.box[3]) / 2]]))[0]
+            c_prev = apply_affine(warp, np.array([[(box_ref[0] + box_ref[2]) / 2, (box_ref[1] + box_ref[3]) / 2]]))[0]
             body = float(np.linalg.norm(c_now - c_prev) / scale / dt)
         # Wrist motion should mean hands moving relative to the body, not the whole person walking.
         wrist = max(wrist - body, 0.0) if wrists else 0.0
         return wrist, body
 
-    def _step(self, tr: Track, t: float, energy: float, wrist: float, body: float, ready: bool) -> None:
-        """Threshold the windowed signals and advance the track's Working/Idle state machine."""
+    def _step(self, tr: Track, t: float, energy: float, wrist: float, body: float, ready: bool,
+              gap: float) -> None:
+        """Threshold the windowed signals and advance the track's Working/Idle state machine.
+
+        gap: seconds since this track was last seen. Time while unseen (occluded, outside the zone) is not
+        counted: the open segment stays closed where the track was last seen and a new one starts now.
+        """
         score = max(energy / self.c["energy_thr"], wrist / self.c["wrist_thr"], body / self.c["body_thr"])
         tr.signals = dict(energy=energy, wrist=wrist, body=body, score=score)
         raw = WORKING if score >= 1.0 else IDLE
@@ -168,6 +195,9 @@ class ActivityEngine:
                 tr.segments.append(Segment(tr.first_t, t + self.dt, raw))
             return
 
+        if gap > self.f["max_gap_s"]:
+            tr.segments.append(Segment(t, t + self.dt, tr.state))
+            tr.pending = None
         seg = tr.segments[-1]
         seg.end = t + self.dt
         if raw == tr.state:
@@ -181,3 +211,10 @@ class ActivityEngine:
             seg.end = tr.pending_since
             tr.segments.append(Segment(tr.pending_since, t + self.dt, raw))
             tr.state, tr.pending = raw, None
+
+
+def engine_for_cache(cfg: dict, cache: Path, record: bool = False) -> ActivityEngine:
+    """An engine set up for a video's detection cache (frame timing from meta.json, zones by video name)."""
+    meta = json.loads((cache / "meta.json").read_text())
+    zones = load_zones(cfg, cache.name, meta["width"], meta["height"])
+    return ActivityEngine(cfg, frame_dt=meta["stride"] / meta["fps"], record=record, zones=zones)

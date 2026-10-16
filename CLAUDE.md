@@ -12,7 +12,13 @@ it against human-labelled ground truth, and show it live. See README.md for the 
 - Raw videos live in `data/` and are never modified. Generated output goes in `outputs/` (git-ignored).
 
 ## Data facts
-- Real factory videos (up to 15 min each) are still to come. Until then the only data is a warehouse sample:
+- Factory samples (fixed CCTV):
+  - `data/vidssave.com Example of ... Factory Floor ... 1080p.mp4`: 1920x1080, **6 fps**, 17 s, ~7 workers in hi-vis
+    at packing tables, small/far (40-60 px). Nearly everyone is working the whole clip. Fine hand work seen from
+    behind gives ~zero motion signal: motion rules alone under-count work here.
+  - `data/vidssave.com YTB_1792115108042 360P.mp4`: 640x360, 25 fps, 17.5 min, parcel-sorting room, desk workers
+    at computers + people walking between bins. Low-res: weak detections (conf 0.3-0.5), some people missed.
+- Warehouse sample (moving camera, use `configs/moving_camera.yaml`):
 - `data/warehouse_high_resolution.mp4` (3840x2160) and `data/warehouse_low_resolution.mp4` (426x240) are the
   **same 17.1 s clip** (427 frames @ 25 fps). 240p is too low: tracks fragment. Use the 4K file.
 - The sample camera is **not fixed** (factory CCTV is expected to be): it is an overhead, slowly moving (handheld/drone-style) shot. Raw bbox/pixel motion
@@ -39,6 +45,9 @@ it against human-labelled ground truth, and show it live. See README.md for the 
   (`state` in working/idle/ignore). The benchmark matches GT to predictions by box IoU, not track id.
 - Results: `outputs/<video>/timeline.csv` (`track_id,start_s,end_s,state`) and `summary.json`.
 - Splits: first 60 % of each video = dev (tuning), last 40 % = test.
-- `configs/live.yaml` extends `default.yaml` (configs support `extends:`).
+- `configs/live.yaml` / `moving_camera.yaml` extend `default.yaml` (configs support `extends:`).
+- Work zones: `zones/<video stem or camera name>.json`, normalised polygons, drawn with `tools/zone_tool.py`.
+  A person counts only when the bottom-centre of their box is inside a zone. No file = whole frame.
+- Motion features are measured over `motion.interval_s` (0.2 s), never frame-to-frame, so they are fps-independent.
 - Benchmark with `python -m tracker.benchmark` and report numbers, never "looks good".
 - Never tune thresholds on the test split.

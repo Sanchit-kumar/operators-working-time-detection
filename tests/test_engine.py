@@ -78,3 +78,23 @@ def test_reclassify_matches_fresh_run():
 
     assert recorded.timeline() == fresh.timeline()
     assert len(fresh.timeline()) >= 2  # thresholds actually changed the outcome
+
+
+def test_gap_is_not_counted():
+    # Worker visible 10 s, gone 20 s (occluded / left), back 10 s: only 20 s should be counted.
+    engine = ActivityEngine(load_config(), frame_dt=1 / FPS)
+    frames = list(range(int(10 * FPS))) + list(range(int(30 * FPS), int(40 * FPS)))
+    for i in frames:
+        engine.update(make_frame(i, 0.3))
+    tot = engine.tracks[1].totals()
+    assert abs(sum(tot.values()) - 20) < 0.2, tot
+
+
+def test_people_outside_zones_are_not_counted():
+    inside = [np.array([[0, 0], [1000, 0], [1000, 1000], [0, 1000]], np.float32)]   # feet at (150, 300)
+    outside = [np.array([[500, 500], [900, 500], [900, 900], [500, 900]], np.float32)]
+    for zones, expected in [(inside, 1), (outside, 0)]:
+        engine = ActivityEngine(load_config(), frame_dt=1 / FPS, zones=zones)
+        for i in range(int(5 * FPS)):
+            engine.update(make_frame(i, 0.3))
+        assert len(engine.workers()) == expected

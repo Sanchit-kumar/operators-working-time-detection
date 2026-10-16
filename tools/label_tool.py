@@ -36,6 +36,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tracker.config import ROOT, load_config, output_dir  # noqa: E402
+from tracker.zones import load_zones  # noqa: E402
 
 COLORS = {"working": (60, 200, 60), "idle": (40, 140, 255), "ignore": (120, 120, 120), None: (255, 255, 255)}
 KEY_STATE = {ord("w"): "working", ord("i"): "idle", ord("x"): "ignore"}
@@ -97,6 +98,7 @@ def main():
     n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     W = 1280
     scale = W / cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+    zones = load_zones(cfg, video.stem, int(cap.get(3)), int(cap.get(4)))  # shown for reference only
 
     state = dict(frame=0, playing=False, selected=None, speed=1.0, boxes=[])
 
@@ -121,6 +123,8 @@ def main():
                 continue
             cached_idx, cached_img = f, cv2.resize(img, None, fx=scale, fy=scale)
         view = cached_img.copy()
+        for z in zones or []:
+            cv2.polylines(view, [(z * scale).astype(np.int32)], True, (255, 200, 0), 1)
         t = f / fps
 
         # draw tracks (use the nearest cached frame when the detector ran with vid_stride > 1)

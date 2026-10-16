@@ -23,15 +23,14 @@ import pandas as pd
 from . import IDLE, STATES, WORKING
 from .config import ROOT, load_config, output_dir
 from .detect import load_cache
-from .engine import ActivityEngine
+from .engine import ActivityEngine, engine_for_cache
 
 MISSED = "missed"
 DEV_FRACTION = 0.6  # first 60 % of each video is the dev (tuning) split, the rest is test
 
 
 def replay(cfg: dict, cache: Path, record: bool = False) -> ActivityEngine:
-    meta = json.loads((cache / "meta.json").read_text())
-    engine = ActivityEngine(cfg, frame_dt=meta["stride"] / meta["fps"], record=record)
+    engine = engine_for_cache(cfg, cache, record)
     for d in load_cache(cache):
         engine.update(d)
     return engine

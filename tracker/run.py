@@ -17,9 +17,9 @@ import cv2
 import pandas as pd
 from tqdm import tqdm
 
-from .config import load_config, output_dir
-from .detect import Detector, cam_row, iter_video, load_cache, save_cache, to_rows
-from .engine import ActivityEngine
+from .config import ROOT, load_config, output_dir
+from .detect import CacheWriter, Detector, iter_video, load_cache
+from .engine import engine_for_cache
 from .render import draw
 
 
@@ -34,20 +34,19 @@ def detect_stage(cfg, video: Path, out: Path) -> None:
     fps, n, w, h = video_info(video)
     stride = cfg["detector"]["vid_stride"]
     det = Detector(cfg)
-    rows, cams = [], []
+    cache = CacheWriter()
     start = time.time()
-    for idx, t, frame in tqdm(iter_video(video, stride), total=n // stride, desc=f"detect {video.name}"):
-        d = det(frame, idx, t)
-        rows += to_rows(d)
-        cams.append(cam_row(d))
+    for idx, t, frame in tqdm(iter_video(video, stride), total=-(-n // stride), desc=f"detect {video.name}"):
+        cache.add(det(frame, idx, t))
     elapsed = time.time() - start
-    save_cache(out, rows, cams, dict(video=str(video), fps=fps, frames=n, width=w, height=h, stride=stride,
-                                     detect_fps=round(len(cams) / elapsed, 1)))
+    cache.save(out, dict(video=str(video), fps=fps, frames=n, width=w, height=h, stride=stride,
+                         model=cfg["detector"]["model"], imgsz=det.imgsz,
+                         detect_fps=round(len(cache.cam) / elapsed, 1)))
 
 
 def classify_stage(cfg, video: Path, out: Path, save_video: bool) -> dict:
     meta = json.loads((out / "meta.json").read_text())
-    engine = ActivityEngine(cfg, frame_dt=meta["stride"] / meta["fps"])
+    engine = engine_for_cache(cfg, out)
     writer = frames = None
     if save_video:
         scale = min(1.0, 1280 / meta["width"])
@@ -78,8 +77,11 @@ def main():
     p.add_argument("--config", default=None)
     p.add_argument("--redetect", action="store_true")
     p.add_argument("--no-video", action="store_true")
+    p.add_argument("--stride", type=int, help="override detector.vid_stride (implies --redetect)")
     a = p.parse_args()
     cfg = load_config(a.config) if a.config else load_config()
+    if a.stride:
+        cfg["detector"]["vid_stride"], a.redetect = a.stride, True
 
     results = []
     for video in a.videos:
@@ -96,7 +98,7 @@ def main():
     if len(results) > 1:
         df = pd.DataFrame([{k: r[k] for k in ("video", "duration_s", "workers", "working_s", "idle_s", "working_pct")}
                            for r in results])
-        df.to_csv(Path(cfg["output"]["dir"]) / "all_videos_summary.csv", index=False)
+        df.to_csv(ROOT / cfg["output"]["dir"] / "all_videos_summary.csv", index=False)
         print("\n" + df.to_string(index=False))
 
 

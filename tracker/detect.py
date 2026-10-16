@@ -30,15 +30,25 @@ class Detector:
 
         d = cfg["detector"]
         self.model = YOLO(d["model"])
-        self.track_kwargs = dict(persist=True, tracker=d["tracker"], imgsz=d["imgsz"], conf=d["conf"],
+        self.track_kwargs = dict(persist=True, tracker=d["tracker"], conf=d["conf"],
                                  device=d["device"], quantize=d["quantize"], classes=[0], verbose=False)
-        self.imgsz = d["imgsz"]
+        self.imgsz_cfg = d["imgsz"]
+        self.imgsz = None
         m = cfg["motion"]
-        self.motion = MotionEstimator(m["work_width"], m["diff_threshold"])
+        self.motion = MotionEstimator(m["work_width"], m["diff_threshold"], m["fixed_camera"], m["interval_s"])
+
+    @staticmethod
+    def auto_imgsz(frame_shape) -> int:
+        """Inference size from the video resolution: native size (small far-away workers stay detectable),
+        at least 1280 (low-res video is upscaled, which helps tiny people) and at most 1920 (speed)."""
+        return int(np.clip(round(max(frame_shape[:2]) / 32) * 32, 1280, 1920))
 
     def __call__(self, frame: np.ndarray, frame_idx: int, t: float) -> FrameDetections:
-        # The model letterboxes to imgsz anyway; resizing first also keeps the tracker's camera-motion
-        # compensation and ReID off the full-resolution (e.g. 4K) frame, which is much faster.
+        if self.imgsz is None:
+            self.imgsz = self.auto_imgsz(frame.shape) if self.imgsz_cfg == "auto" else int(self.imgsz_cfg)
+            self.track_kwargs["imgsz"] = self.imgsz
+        # The model letterboxes to imgsz anyway; resizing first also keeps the tracker's ReID and our motion
+        # estimation off the full-resolution (e.g. 4K) frame, which is much faster.
         s = min(1.0, self.imgsz / max(frame.shape[:2]))
         small = cv2.resize(frame, None, fx=s, fy=s, interpolation=cv2.INTER_LINEAR) if s < 1 else frame
         r = self.model.track(small, **self.track_kwargs)[0]
@@ -51,7 +61,7 @@ class Detector:
         else:
             ids, boxes, confs = np.zeros(0, int), np.zeros((0, 4)), np.zeros(0)
             kpts = np.zeros((0, N_KPTS, 3))
-        affine, energy = self.motion.update(small, boxes * s)
+        affine, energy = self.motion.update(small, boxes * s, t)
         affine[:, 2] /= s  # translation back to full-resolution pixels
         return FrameDetections(frame_idx, t, ids, boxes, confs, kpts, energy, affine)
 
@@ -80,39 +90,44 @@ KPT_COLS = [f"k{i}_{c}" for i in range(N_KPTS) for c in "xyc"]
 AFF_COLS = [f"a{i}" for i in range(6)]
 
 
-def to_rows(d: FrameDetections) -> list[dict]:
-    rows = []
-    for i in range(len(d.ids)):
-        row = dict(frame=d.frame_idx, t=d.t, track_id=int(d.ids[i]), conf=float(d.confs[i]),
-                   x1=d.boxes[i, 0], y1=d.boxes[i, 1], x2=d.boxes[i, 2], y2=d.boxes[i, 3],
-                   energy=float(d.energy[i]))
-        row.update(zip(KPT_COLS, d.kpts[i].ravel().tolist()))
-        rows.append(row)
-    return rows
+DET_COLS = ["frame", "t", "track_id", "conf", "x1", "y1", "x2", "y2", "energy", *KPT_COLS]
 
 
-def save_cache(out_dir: Path, rows: list[dict], cams: list[dict], meta: dict) -> None:
-    pd.DataFrame(rows).to_parquet(out_dir / "detections.parquet")
-    pd.DataFrame(cams).to_parquet(out_dir / "camera.parquet")
-    pd.Series(meta).to_json(out_dir / "meta.json")
+class CacheWriter:
+    """Accumulates detections as compact numpy blocks (a 15-min video has ~100k+ person-frames)."""
+
+    def __init__(self):
+        self.det, self.cam = [], []
+
+    def add(self, d: FrameDetections) -> None:
+        n = len(d.ids)
+        if n:
+            self.det.append(np.column_stack([np.full(n, d.frame_idx), np.full(n, d.t), d.ids, d.confs, d.boxes,
+                                             d.energy, d.kpts.reshape(n, -1)]).astype(np.float64))
+        self.cam.append(np.r_[d.frame_idx, d.t, d.affine.ravel()])
+
+    def save(self, out_dir: Path, meta: dict) -> None:
+        det = pd.DataFrame(np.vstack(self.det) if self.det else np.zeros((0, len(DET_COLS))), columns=DET_COLS)
+        det = det.astype({"frame": int, "track_id": int})
+        cols = {c: np.float32 for c in DET_COLS[3:]}
+        det.astype(cols).to_parquet(out_dir / "detections.parquet")
+        cam = pd.DataFrame(np.vstack(self.cam), columns=["frame", "t", *AFF_COLS]).astype({"frame": int})
+        cam.to_parquet(out_dir / "camera.parquet")
+        pd.Series(meta).to_json(out_dir / "meta.json")
 
 
 def load_cache(out_dir: Path):
     """Yield FrameDetections in frame order from a saved cache."""
-    det = pd.read_parquet(out_dir / "detections.parquet")
+    det = pd.read_parquet(out_dir / "detections.parquet").sort_values(["frame", "track_id"], kind="stable")
     cams = pd.read_parquet(out_dir / "camera.parquet")
-    by_frame = dict(tuple(det.groupby("frame"))) if len(det) else {}
-    for cam in cams.itertuples(index=False):
-        g = by_frame.get(cam.frame)
-        affine = np.array([getattr(cam, c) for c in AFF_COLS], np.float32).reshape(2, 3)
-        if g is None:
-            yield FrameDetections(cam.frame, cam.t, np.zeros(0, int), np.zeros((0, 4)), np.zeros(0),
-                                  np.zeros((0, N_KPTS, 3)), np.zeros(0), affine)
-            continue
-        yield FrameDetections(cam.frame, cam.t, g.track_id.to_numpy(), g[["x1", "y1", "x2", "y2"]].to_numpy(),
-                              g.conf.to_numpy(), g[KPT_COLS].to_numpy().reshape(-1, N_KPTS, 3),
-                              g.energy.to_numpy(), affine)
-
-
-def cam_row(d: FrameDetections) -> dict:
-    return dict(frame=d.frame_idx, t=d.t, **dict(zip(AFF_COLS, d.affine.ravel().tolist())))
+    frames = det.frame.to_numpy()
+    ids, confs, energy = det.track_id.to_numpy(), det.conf.to_numpy(np.float64), det.energy.to_numpy(np.float64)
+    boxes = det[["x1", "y1", "x2", "y2"]].to_numpy(np.float64)
+    kpts = det[KPT_COLS].to_numpy(np.float64).reshape(-1, N_KPTS, 3)
+    affines = cams[AFF_COLS].to_numpy(np.float32).reshape(-1, 2, 3)
+    starts = np.searchsorted(frames, cams.frame.to_numpy(), "left")
+    ends = np.searchsorted(frames, cams.frame.to_numpy(), "right")
+    for k, (f, t) in enumerate(zip(cams.frame.to_numpy(), cams.t.to_numpy())):
+        a, b = starts[k], ends[k]
+        yield FrameDetections(int(f), float(t), ids[a:b], boxes[a:b], confs[a:b], kpts[a:b], energy[a:b],
+                              affines[k].copy())
