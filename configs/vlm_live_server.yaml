@@ -1,0 +1,8 @@
+# Live view on this laptop, VLM decisions from a vLLM server (e.g. the A100 via an SSH tunnel on port 8000).
+extends: vlm_live.yaml
+
+vlm:
+  backend: openai
+  model: Qwen/Qwen3-VL-8B-Instruct   # must match the model `vllm serve` is running
+  base_url: http://localhost:8000/v1
+  concurrency: 16

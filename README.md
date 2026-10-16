@@ -154,7 +154,8 @@ the sack pile in video B) without zones. Detection and tracking are the same as 
 | `configs/vlm.yaml` | this laptop (8 GB GPU), in-process | Qwen3-VL-2B-Instruct (4.3 GB) |
 | `configs/vlm_a100.yaml` | A100, in-process (simplest) | Qwen3-VL-8B-Instruct (17.5 GB); 32B on an 80 GB card |
 | `configs/vlm_server.yaml` | A100 + vLLM server (fastest) | Qwen3-VL-8B-Instruct |
-| `configs/vlm_live.yaml` | live view + background VLM | as `vlm.yaml` (point it at the 8B / server on the A100) |
+| `configs/vlm_live.yaml` | live view + background VLM, in-process | Qwen3-VL-2B-Instruct |
+| `configs/vlm_live_server.yaml` | live view on the laptop, VLM on the A100 (SSH tunnel) | Qwen3-VL-8B-Instruct via vLLM |
 
 ```bash
 # quick check: 20 queries spread over the video, and save what the model sees to outputs/<video>/vlm_samples/
@@ -174,29 +175,102 @@ python -m tracker.benchmark "$A" "$B" --config configs/vlm.yaml
 python -m tracker.benchmark "$A" "$B" --config configs/tuned.yaml        # motion classifier, for comparison
 ```
 
-### On the A100 machine
+### Using the A100 over SSH
+
+Replace `user@a100` with your login (or add a `Host a100` entry to `~/.ssh/config`). Two ways to use it:
+
+| | Option A: everything on the A100 | Option B: A100 as a model server (SSH tunnel) |
+|---|---|---|
+| Runs on the A100 | detection + VLM + reports | only `vllm serve` |
+| Runs on the laptop | nothing (copy results back) | detection, labelling, reports, **live view** |
+| Videos leave the laptop | yes (copied to the A100) | only the crops sent per query |
+| Best for | batch benchmark of many / long videos | live demo, quick experiments |
+
+#### Option A: run everything on the A100
+
+On the laptop, copy the code (without the venv, caches or weights) and the videos:
 
 ```bash
-git clone <this repo> && cd worker-activity-tracker
-python3 -m venv .venv && source .venv/bin/activate
-pip install torch torchvision                     # pick the build matching that machine's CUDA driver
-pip install -r requirements.txt
-mkdir -p data && cp /path/to/videos/*.mp4 data/   # videos are not in git
-
-# Option 1, in-process (downloads the model on first use)
-python -m tracker.run data/*.mp4 --config configs/vlm_a100.yaml
-python -m tracker.benchmark "$A" "$B" --config configs/vlm_a100.yaml
-
-# Option 2, vLLM server (faster). Terminal 1:
-pip install vllm
-vllm serve Qwen/Qwen3-VL-8B-Instruct --max-model-len 16384 --limit-mm-per-prompt '{"image": 8}'
-# Terminal 2:
-python -m tracker.run data/*.mp4 --config configs/vlm_server.yaml
+cd "/home/sanch/UbuntuCode/Python/Computer vision/worker-activity-tracker"
+rsync -av --exclude .venv --exclude outputs --exclude data --exclude '*.pt' ./ user@a100:~/worker-activity-tracker/
+rsync -av data/ user@a100:~/worker-activity-tracker/data/
+# optional: reuse the detections already computed here, so the A100 skips the detection stage
+rsync -avm --include '*/' --include 'detections.parquet' --include 'camera.parquet' --include 'meta.json' \
+      --exclude '*' outputs/ user@a100:~/worker-activity-tracker/outputs/
 ```
 
-To reuse detections computed elsewhere, copy `outputs/<video>/{detections.parquet,camera.parquet,meta.json}`
-along with the video. Labels are in git (`labels/`), so the benchmark works there directly. For larger models,
-change `vlm.model` (e.g. `Qwen/Qwen3-VL-32B-Instruct` on an 80 GB A100, or `quantize: 4bit` on smaller GPUs).
+On the A100 (`ssh user@a100`), one-time setup:
+
+```bash
+cd ~/worker-activity-tracker
+python3 -m venv .venv && source .venv/bin/activate
+nvidia-smi                                         # note the CUDA version the driver supports
+pip install torch torchvision                      # or the matching build, e.g. --index-url https://download.pytorch.org/whl/cu124
+pip install -r requirements.txt
+python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+export HF_HOME=/path/with/space/hf                 # optional: models are 17.5 GB (8B) / 67 GB (32B)
+```
+
+Run (inside `tmux` or `screen`, so a dropped SSH connection doesn't stop it):
+
+```bash
+tmux new -s vlm                                    # re-attach later with: tmux attach -t vlm
+source .venv/bin/activate
+A="data/vidssave.com Example of Hi-Definition Video Surveillance of a Factory Floor - by CCTVDOC.COM 1080p.mp4"
+B="data/vidssave.com YTB_1792115108042 360P.mp4"
+
+python -m tracker.vlm "$A" --config configs/vlm_a100.yaml --limit 20 --save-samples 20   # quick check
+python -m tracker.run "$A" "$B" --config configs/vlm_a100.yaml                          # reports + annotated videos
+python -m tracker.benchmark "$A" "$B" --config configs/vlm_a100.yaml                    # accuracy vs labels
+python -m tracker.benchmark "$A" "$B" --config configs/tuned.yaml                       # motion classifier, to compare
+```
+
+For the 32B model on an 80 GB A100, set `vlm.model: Qwen/Qwen3-VL-32B-Instruct` in `configs/vlm_a100.yaml`.
+
+For more speed, use vLLM on the A100 instead of the in-process model (separate venv recommended):
+
+```bash
+python3 -m venv ~/vllm-env && source ~/vllm-env/bin/activate && pip install vllm
+vllm serve Qwen/Qwen3-VL-8B-Instruct --max-model-len 16384 --limit-mm-per-prompt '{"image": 8}'   # tmux window 1
+# tmux window 2, in the project venv:
+python -m tracker.run "$A" "$B" --config configs/vlm_server.yaml
+python -m tracker.benchmark "$A" "$B" --config configs/vlm_server.yaml
+```
+
+Copy results back to the laptop:
+
+```bash
+rsync -avm --include '*/' --include 'summary.json' --include 'timeline.csv' --include 'vlm_*.parquet' \
+      --include 'annotated.mp4' --include '*.json' --include '*.csv' --exclude '*' \
+      user@a100:~/worker-activity-tracker/outputs/ outputs/
+```
+
+#### Option B: A100 as a model server through an SSH tunnel
+
+On the A100 (in `tmux`), start the server. It listens only on the A100's localhost; the tunnel carries the traffic:
+
+```bash
+source ~/vllm-env/bin/activate
+vllm serve Qwen/Qwen3-VL-8B-Instruct --max-model-len 16384 --limit-mm-per-prompt '{"image": 8}'
+```
+
+On the laptop, open the tunnel (keep this terminal open) and check it:
+
+```bash
+ssh -N -L 8000:localhost:8000 user@a100
+curl http://localhost:8000/v1/models               # in another terminal: should list Qwen/Qwen3-VL-8B-Instruct
+```
+
+Then run everything on the laptop as usual; the VLM queries go to the A100:
+
+```bash
+python -m tracker.run "$A" "$B" --config configs/vlm_server.yaml          # batch reports
+python -m tracker.benchmark "$A" "$B" --config configs/vlm_server.yaml    # accuracy vs labels
+python -m tracker.live "$B" --config configs/vlm_live_server.yaml         # live view with A100 decisions
+```
+
+If port 8000 is taken on the laptop, use `-L 8001:localhost:8000` and set `vlm.base_url: http://localhost:8001/v1`.
+If the server runs a different model, set `vlm.model` in the config to the same name (`curl .../v1/models` shows it).
 
 ## 7. Tests
 
@@ -225,6 +299,10 @@ Final inference with `configs/tuned.yaml`:
 | B: 360p, 25 fps, 17.5 min | 149 | 1533.8 s | 674.3 s | 69.5 % |
 
 These numbers come from a small test set (129 worker-seconds, 18 of them idle), so treat them as preliminary.
+
+Zero-shot VLM, Qwen3-VL-2B (laptop, video A, 120 labelled worker-seconds): answered "working" for all 54 queries
+(accuracy 0.59, idle recall 0). The pipeline works end to end, but 2B is too small to separate working from idle.
+The 8B / 32B models on the A100 are the real test (section 6).
 More labelled video, especially idle periods, is the most effective way to raise and verify accuracy.
 
 Known limitations: low-resolution cameras (360p) miss seated workers behind monitors, and tracks fragment into
