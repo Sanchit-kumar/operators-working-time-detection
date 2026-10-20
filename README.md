@@ -1,5 +1,7 @@
 # Worker Activity Tracker
 
+> Step-by-step commands for every module: [MANUAL.md](MANUAL.md).
+
 Measures how long each factory worker spends **Working** vs **Idle** in CCTV video, benchmarks the result
 against human labels, and shows it live.
 
