@@ -245,6 +245,23 @@ rsync -avm --include '*/' --include 'summary.json' --include 'timeline.csv' --in
       user@a100:~/worker-activity-tracker/outputs/ outputs/
 ```
 
+#### If something fails on the A100
+
+| Symptom | Fix |
+|---|---|
+| `ImportError: libGL.so.1` when importing cv2 (headless server) | `sudo apt-get install -y libgl1 libglib2.0-0`, or `pip uninstall -y opencv-python && pip install opencv-python-headless` |
+| `torch.cuda.is_available()` is False | the torch build doesn't match the driver: check `nvidia-smi`, reinstall torch from the matching `--index-url https://download.pytorch.org/whl/cuXXX` |
+| Qwen3-VL not recognised by transformers | `pip install -U "transformers>=4.57"` |
+| `CUDA out of memory` | lower `vlm.batch_size` (e.g. 4), or use `quantize: 4bit` (`pip install bitsandbytes`) |
+| `Cannot reach the VLM server` | start `vllm serve` first; with Option B keep the `ssh -N -L ...` tunnel open |
+| `The server serves [...] but vlm.model is ...` | set `vlm.model` to the name the server lists |
+| vLLM rejects `--limit-mm-per-prompt '{"image": 8}'` | older vLLM syntax: `--limit-mm-per-prompt image=8` |
+| model downloads slow / rate-limited | `huggingface-cli login` (or `export HF_TOKEN=...`) |
+| YOLO weights download | automatic on first run (`yolo11x-pose.pt`, 118 MB); not needed at all if you copied the detection caches |
+
+GUI tools (`tracker.live` windows, `label_tool`, `zone_tool`) need a display: use them on the laptop (Option B),
+or run `tracker.live ... --no-show --save out.mp4` on the server.
+
 #### Option B: A100 as a model server through an SSH tunnel
 
 On the A100 (in `tmux`), start the server. It listens only on the A100's localhost; the tunnel carries the traffic:

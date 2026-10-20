@@ -201,6 +201,19 @@ class OpenAIBackend:
         self.model, self.concurrency, self.max_new_tokens = v["model"], v["concurrency"], v["max_new_tokens"]
         self.headers = {"Authorization": f"Bearer {v.get('api_key') or 'EMPTY'}"}
         self.verbose = True
+        self._check_server(v["base_url"])
+
+    def _check_server(self, base_url: str) -> None:
+        """Fail early with a clear message if the server is down or serves a different model."""
+        try:
+            r = self.session.get(base_url.rstrip("/") + "/models", headers=self.headers, timeout=10)
+            r.raise_for_status()
+        except Exception as e:
+            raise SystemExit(f"Cannot reach the VLM server at {base_url} ({type(e).__name__}). Is `vllm serve` "
+                             f"running, and the SSH tunnel open (ssh -N -L 8000:localhost:8000 user@a100)?")
+        served = [m["id"] for m in r.json().get("data", [])]
+        if served and self.model not in served:
+            raise SystemExit(f"The server serves {served}, but vlm.model is {self.model!r}. Set vlm.model to one of them.")
 
     def _one(self, q: Query) -> str:
         images = [{"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(b).decode()}}
@@ -274,6 +287,7 @@ def run_vlm(cfg: dict, video: Path, limit: int | None = None, save_samples: int 
     if limit:  # spread a quick check over the whole video
         queries = [queries[i] for i in np.linspace(0, len(queries) - 1, min(limit, len(queries))).astype(int)]
     print(f"{video.name}: {len(queries)} VLM queries ({cfg['vlm']['backend']}: {cfg['vlm']['model']})")
+    backend = BACKENDS[cfg["vlm"]["backend"]](cfg)  # first, so a missing server / model fails before the crop pass
     build_images(video, queries, cfg, meta["stride"])
 
     if save_samples:  # what the model sees, for inspection
@@ -286,8 +300,13 @@ def run_vlm(cfg: dict, video: Path, limit: int | None = None, save_samples: int 
             cv2.imwrite(str(sample_dir / f"track{q.track_id}_t{q.t:07.1f}.jpg"), strip)
 
     start = time.time()
-    answers = BACKENDS[cfg["vlm"]["backend"]](cfg)(queries)
+    answers = backend(queries)
     elapsed = time.time() - start
+    failed = sum(a.startswith("ERROR") for a in answers)
+    if failed > len(answers) / 2:  # don't save a file of errors: reports would silently fall back to motion
+        raise SystemExit(f"{failed}/{len(answers)} VLM requests failed, e.g. {next(a for a in answers if a.startswith('ERROR'))}")
+    if failed:
+        print(f"warning: {failed}/{len(answers)} VLM requests failed; those times fall back to the motion classifier")
     rows = []
     for q, a in zip(queries, answers):
         state, conf, reason = parse_answer(a)
