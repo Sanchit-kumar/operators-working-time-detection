@@ -8,14 +8,22 @@ For the background (how it works, results), see [README.md](README.md).
 ```bash
 cd "/home/sanch/UbuntuCode/Python/Computer vision/worker-activity-tracker"
 source .venv/bin/activate
-
-# The video names contain spaces: keep them in variables and always quote them
-A="data/vidssave.com Example of Hi-Definition Video Surveillance of a Factory Floor - by CCTVDOC.COM 1080p.mp4"
-B="data/vidssave.com YTB_1792115108042 360P.mp4"
-W="data/warehouse_high_resolution.mp4"          # moving-camera sample
 ```
 
-Any new video: put it in `data/` and use its path the same way (`V="data/my video.mp4"`).
+### Videos
+
+| Video | What it is | Original file name |
+|---|---|---|
+| `data/video1.mp4` | factory floor, fixed CCTV, 1920x1080, 6 fps, 17 s, ~9 workers at packing tables | `vidssave.com Example of Hi-Definition Video Surveillance of a Factory Floor - by CCTVDOC.COM 1080p.mp4` |
+| `data/video2.mp4` | parcel-sorting room, fixed CCTV, 640x360, 25 fps, 17.5 min, desk workers + walking | `vidssave.com YTB_1792115108042 360P.mp4` |
+| `data/video3.mp4` | warehouse, **moving camera**, 3840x2160, 25 fps, 17 s (use `configs/moving_camera.yaml`) | `warehouse_high_resolution.mp4` |
+| `data/video4.mp4` | same clip as video3 at 426x240 (too low-res: tracks fragment) | `warehouse_low_resolution.mp4` |
+
+Labels exist for video1 and video2 (`labels/video1.*`, `labels/video2.*`). The mapping is also in `videos.csv`.
+
+New videos: copy them into `data/`, then run `python tools/rename_videos.py` (shows the plan) and
+`python tools/rename_videos.py --yes` to name them `video5.mp4`, `video6.mp4`, ... (original names go to
+`videos.csv`; matching labels, zones and outputs are renamed with them).
 
 ### Order of the modules
 
@@ -46,10 +54,10 @@ Detection (stage 1) runs once per video and is cached; everything after it re-ru
 and `outputs/all_videos_summary.csv` when several videos are given.
 
 ```bash
-python -m tracker.run "$A"                                   # default config (motion, untuned thresholds)
-python -m tracker.run "$A" "$B" --config configs/tuned.yaml  # tuned motion thresholds (recommended)
-python -m tracker.run "$A" "$B" --config configs/vlm.yaml    # zero-shot VLM classifier (see section 7)
-python -m tracker.run data/*.mp4 --config configs/tuned.yaml # every video in data/
+python -m tracker.run data/video1.mp4                                               # default config (motion, untuned thresholds)
+python -m tracker.run data/video1.mp4 data/video2.mp4 --config configs/tuned.yaml   # tuned motion thresholds (recommended)
+python -m tracker.run data/video1.mp4 data/video2.mp4 --config configs/vlm.yaml     # zero-shot VLM classifier (see section 7)
+python -m tracker.run data/video*.mp4 --config configs/tuned.yaml                   # every video (video3/4 are moving-camera: use moving_camera.yaml for them)
 ```
 
 | Option | Meaning |
@@ -63,16 +71,16 @@ python -m tracker.run data/*.mp4 --config configs/tuned.yaml # every video in da
 Examples:
 
 ```bash
-python -m tracker.run "$B" --config configs/tuned.yaml --stride 2       # 17-min video, ~2x faster detection
-python -m tracker.run "$A" --redetect --no-video                        # fresh detection cache only
-python -m tracker.run "$W" --config configs/moving_camera.yaml          # handheld / panning camera
+python -m tracker.run data/video2.mp4 --config configs/tuned.yaml --stride 2   # 17-min video, ~2x faster detection
+python -m tracker.run data/video1.mp4 --redetect --no-video                    # fresh detection cache only
+python -m tracker.run data/video3.mp4 --config configs/moving_camera.yaml      # handheld / panning camera
 ```
 
 Look at the results:
 
 ```bash
-cat "outputs/$(basename "$A" .mp4)/summary.json"
-head "outputs/$(basename "$A" .mp4)/timeline.csv"
+cat outputs/video1/summary.json
+head outputs/video1/timeline.csv
 cat outputs/all_videos_summary.csv
 ```
 
@@ -88,9 +96,9 @@ Only people whose feet are inside a zone are counted. Needs a display (laptop).
 **Reads** a video. **Writes** `zones/<video name>.json` (or `zones/<name>.json`). No zone file = whole frame.
 
 ```bash
-python tools/zone_tool.py "$B"                # draw on the frame at 2 s
-python tools/zone_tool.py "$B" --at 300       # draw on the frame at 300 s
-python tools/zone_tool.py "$B" --name cam1    # save as zones/cam1.json (one per camera; use with live --zones cam1)
+python tools/zone_tool.py data/video2.mp4               # draw on the frame at 2 s
+python tools/zone_tool.py data/video2.mp4 --at 300      # draw on the frame at 300 s
+python tools/zone_tool.py data/video2.mp4 --name cam1   # save as zones/cam1.json (one per camera; use with live --zones cam1)
 ```
 
 | Key / mouse | Action |
@@ -105,7 +113,7 @@ python tools/zone_tool.py "$B" --name cam1    # save as zones/cam1.json (one per
 Quitting with no zones deletes the file (whole frame counts). After drawing, re-run stage 2 (no re-detection):
 
 ```bash
-python -m tracker.run "$B" --config configs/tuned.yaml --no-video
+python -m tracker.run data/video2.mp4 --config configs/tuned.yaml --no-video
 ```
 
 ---
@@ -118,9 +126,9 @@ Needs the detection cache (stage 1) and a display.
 and `labels/<video name>.csv` (on quit; read by the benchmark and tuner).
 
 ```bash
-python -m tracker.run "$A" --no-video          # 1. detection cache, if not there yet
-python tools/label_tool.py "$A"                # 2. label
-python tools/label_tool.py "$B" --suggest      #    pre-drawn predictions to accept (c) or correct
+python -m tracker.run data/video1.mp4 --no-video       # 1. detection cache, if not there yet
+python tools/label_tool.py data/video1.mp4             # 2. label
+python tools/label_tool.py data/video2.mp4 --suggest   #    pre-drawn predictions to accept (c) or correct
 ```
 
 | Option | Meaning |
@@ -153,7 +161,7 @@ Needs labels for every video given. **Reads** the caches and `labels/*.csv`. **W
 (overwrites it).
 
 ```bash
-python -m tracker.tune "$A" "$B"
+python -m tracker.tune data/video1.mp4 data/video2.mp4
 ```
 
 | Option | Meaning |
@@ -171,9 +179,9 @@ Takes under a minute. Keep a copy if you want to compare: `cp configs/tuned.yaml
 **Reads** the caches, `labels/*.csv` and (VLM configs) the VLM predictions. **Writes** `outputs/benchmark_<split>.json`.
 
 ```bash
-python -m tracker.benchmark "$A" "$B" --config configs/tuned.yaml --split test    # tuned motion, held-out part
-python -m tracker.benchmark "$A" "$B" --config configs/vlm.yaml                   # zero-shot VLM, all labels
-python -m tracker.benchmark "$A" --split test                                     # default thresholds
+python -m tracker.benchmark data/video1.mp4 data/video2.mp4 --config configs/tuned.yaml --split test   # tuned motion, held-out part
+python -m tracker.benchmark data/video1.mp4 data/video2.mp4 --config configs/vlm.yaml                  # zero-shot VLM, all labels
+python -m tracker.benchmark data/video1.mp4 --split test                                               # default thresholds
 ```
 
 | Option | Meaning |
@@ -197,10 +205,10 @@ automatically if missing). **Writes** `outputs/<video>/vlm_<model>.parquet` (one
 `--save-samples`, `outputs/<video>/vlm_samples/*.jpg` (what the model saw).
 
 ```bash
-python -m tracker.vlm "$A" --config configs/vlm.yaml --limit 20 --save-samples 20   # quick check
-python -m tracker.vlm "$A" "$B" --config configs/vlm.yaml                           # all queries
-python -m tracker.run "$A" "$B" --config configs/vlm.yaml                           # reports from the predictions
-python -m tracker.benchmark "$A" "$B" --config configs/vlm.yaml                     # accuracy
+python -m tracker.vlm data/video1.mp4 --config configs/vlm.yaml --limit 20 --save-samples 20   # quick check
+python -m tracker.vlm data/video1.mp4 data/video2.mp4 --config configs/vlm.yaml                # all queries
+python -m tracker.run data/video1.mp4 data/video2.mp4 --config configs/vlm.yaml                # reports from the predictions
+python -m tracker.benchmark data/video1.mp4 data/video2.mp4 --config configs/vlm.yaml          # accuracy
 ```
 
 | Option | Meaning |
@@ -224,10 +232,10 @@ yourself to redo them (e.g. after a `--limit` check, or a prompt change in `trac
 ```bash
 ssh user@a100
 cd ~/worker-activity-tracker && source .venv/bin/activate
-tmux new -s vlm                                                  # survives SSH disconnects (tmux attach -t vlm)
-python -m tracker.vlm "$A" --config configs/vlm_a100.yaml --limit 20 --save-samples 20
-python -m tracker.run "$A" "$B" --config configs/vlm_a100.yaml
-python -m tracker.benchmark "$A" "$B" --config configs/vlm_a100.yaml
+tmux new -s vlm   # survives SSH disconnects (tmux attach -t vlm)
+python -m tracker.vlm data/video1.mp4 --config configs/vlm_a100.yaml --limit 20 --save-samples 20
+python -m tracker.run data/video1.mp4 data/video2.mp4 --config configs/vlm_a100.yaml
+python -m tracker.benchmark data/video1.mp4 data/video2.mp4 --config configs/vlm_a100.yaml
 ```
 
 ### VLM through a vLLM server
@@ -242,9 +250,9 @@ ssh -N -L 8000:localhost:8000 user@a100
 curl http://localhost:8000/v1/models
 
 # then, on the laptop (or in A100 tmux window 2)
-python -m tracker.vlm "$A" "$B" --config configs/vlm_server.yaml
-python -m tracker.run "$A" "$B" --config configs/vlm_server.yaml
-python -m tracker.benchmark "$A" "$B" --config configs/vlm_server.yaml
+python -m tracker.vlm data/video1.mp4 data/video2.mp4 --config configs/vlm_server.yaml
+python -m tracker.run data/video1.mp4 data/video2.mp4 --config configs/vlm_server.yaml
+python -m tracker.benchmark data/video1.mp4 data/video2.mp4 --config configs/vlm_server.yaml
 ```
 
 Setup of the A100 machine, copying code / videos / results, and troubleshooting: README.md, section 6.
@@ -256,13 +264,13 @@ Setup of the A100 machine, copying code / videos / results, and troubleshooting:
 Detection + classification on a file, IP camera or webcam, with an on-screen overlay. Independent of the cache.
 
 ```bash
-python -m tracker.live "$A"                                        # fast model (configs/live.yaml)
-python -m tracker.live "$B" --config configs/tuned.yaml            # accurate model + tuned thresholds (slower)
-python -m tracker.live rtsp://user:pass@camera-ip/stream           # IP camera
-python -m tracker.live 0                                           # webcam
-python -m tracker.live "$B" --config configs/vlm_live.yaml         # VLM decisions in the background (local 2B)
-python -m tracker.live "$B" --config configs/vlm_live_server.yaml  # VLM decisions from the A100 (SSH tunnel)
-python -m tracker.live "$A" --save outputs/live.mp4 --no-show      # record without a window (also on a server)
+python -m tracker.live data/video1.mp4                                         # fast model (configs/live.yaml)
+python -m tracker.live data/video2.mp4 --config configs/tuned.yaml             # accurate model + tuned thresholds (slower)
+python -m tracker.live rtsp://user:pass@camera-ip/stream                       # IP camera
+python -m tracker.live 0                                                       # webcam
+python -m tracker.live data/video2.mp4 --config configs/vlm_live.yaml          # VLM decisions in the background (local 2B)
+python -m tracker.live data/video2.mp4 --config configs/vlm_live_server.yaml   # VLM decisions from the A100 (SSH tunnel)
+python -m tracker.live data/video1.mp4 --save outputs/live.mp4 --no-show       # record without a window (also on a server)
 ```
 
 | Option | Meaning |
@@ -278,7 +286,23 @@ Keys: `q` quit, `space` pause, `d` show motion / VLM signals. Prints the totals 
 
 ---
 
-## 9. Tests
+## 9. Name new videos: `tools/rename_videos.py`
+
+Keeps every video named `videoN.<ext>`. Renames the video and everything that belongs to it (labels, zones,
+outputs, the path in `meta.json`) and records the original name in `videos.csv`.
+
+```bash
+python tools/rename_videos.py                                           # plan for every video not named videoN (dry run)
+python tools/rename_videos.py --yes                                     # apply, in alphabetical order
+python tools/rename_videos.py "data/cam B.mp4" "data/cam A.mp4" --yes   # apply in this order
+```
+
+| Option | Meaning |
+|---|---|
+| `videos` | videos to rename, in this order (default: all non-conforming, sorted) |
+| `--yes` | apply; without it only the plan is printed |
+
+## 10. Tests
 
 ```bash
 pytest -q                     # 18 tests: engine, motion, zones, labels, VLM parsing
@@ -292,40 +316,41 @@ pytest -q tests/test_vlm.py   # one file
 ### A. New video, tuned motion classifier (no labelling)
 
 ```bash
-V="data/my video.mp4"
-python -m tracker.run "$V" --config configs/tuned.yaml
-cat "outputs/$(basename "$V" .mp4)/summary.json"
+cp "/path/to/new video.mp4" data/
+python tools/rename_videos.py --yes   # -> data/video5.mp4 (next free number)
+python -m tracker.run data/video5.mp4 --config configs/tuned.yaml
+cat outputs/video5/summary.json
 ```
 
-### B. New video, zero-shot VLM (A100)
+### B. New video, zero-shot VLM (A100), after renaming it as in A
 
 ```bash
-python -m tracker.vlm "$V" --config configs/vlm_a100.yaml --limit 10 --save-samples 10   # check it looks right
-python -m tracker.run "$V" --config configs/vlm_a100.yaml
+python -m tracker.vlm data/video5.mp4 --config configs/vlm_a100.yaml --limit 10 --save-samples 10   # check it looks right
+python -m tracker.run data/video5.mp4 --config configs/vlm_a100.yaml
 ```
 
-### C. Measure accuracy on a new video
+### C. Measure accuracy on a new video (renamed as in A)
 
 ```bash
-python -m tracker.run "$V" --no-video                                   # detection cache
-python tools/label_tool.py "$V" --suggest                               # label (laptop)
-python -m tracker.benchmark "$V" --config configs/tuned.yaml --split test
-python -m tracker.benchmark "$V" --config configs/vlm_a100.yaml         # on the A100
+python -m tracker.run data/video5.mp4 --no-video                             # detection cache
+python tools/label_tool.py data/video5.mp4 --suggest                         # label (laptop)
+python -m tracker.benchmark data/video5.mp4 --config configs/tuned.yaml --split test
+python -m tracker.benchmark data/video5.mp4 --config configs/vlm_a100.yaml   # on the A100
 ```
 
 ### D. Re-fit the motion thresholds after labelling more videos
 
 ```bash
-python -m tracker.tune "$A" "$B" "$V"
-python -m tracker.benchmark "$A" "$B" "$V" --config configs/tuned.yaml --split test
-python -m tracker.run "$A" "$B" "$V" --config configs/tuned.yaml
+python -m tracker.tune data/video1.mp4 data/video2.mp4 data/video5.mp4
+python -m tracker.benchmark data/video1.mp4 data/video2.mp4 data/video5.mp4 --config configs/tuned.yaml --split test
+python -m tracker.run data/video1.mp4 data/video2.mp4 data/video5.mp4 --config configs/tuned.yaml
 ```
 
 ### E. Start over for one video
 
 ```bash
-rm -rf "outputs/$(basename "$V" .mp4)"          # removes cache, predictions, reports (labels and zones stay)
-python -m tracker.run "$V" --config configs/tuned.yaml
+rm -rf outputs/video5   # removes cache, predictions, reports (labels and zones stay)
+python -m tracker.run data/video5.mp4 --config configs/tuned.yaml
 ```
 
 ## Configs at a glance

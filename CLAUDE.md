@@ -12,19 +12,15 @@ it against human-labelled ground truth, and show it live. See README.md for the 
 - Raw videos live in `data/` and are never modified. Generated output goes in `outputs/` (git-ignored).
 
 ## Data facts
-- Factory samples (fixed CCTV):
-  - `data/vidssave.com Example of ... Factory Floor ... 1080p.mp4`: 1920x1080, **6 fps**, 17 s, ~7 workers in hi-vis
-    at packing tables, small/far (40-60 px). Nearly everyone is working the whole clip. Fine hand work seen from
-    behind gives ~zero motion signal: motion rules alone under-count work here.
-  - `data/vidssave.com YTB_1792115108042 360P.mp4`: 640x360, 25 fps, 17.5 min, parcel-sorting room, desk workers
-    at computers + people walking between bins. Low-res: weak detections (conf 0.3-0.5), some people missed.
-- Warehouse sample (moving camera, use `configs/moving_camera.yaml`):
-- `data/warehouse_high_resolution.mp4` (3840x2160) and `data/warehouse_low_resolution.mp4` (426x240) are the
-  **same 17.1 s clip** (427 frames @ 25 fps). 240p is too low: tracks fragment. Use the 4K file.
-- The sample camera is **not fixed** (factory CCTV is expected to be): it is an overhead, slowly moving (handheld/drone-style) shot. Raw bbox/pixel motion
-  includes camera motion, so motion features must be camera-compensated or body-relative (pose-based).
-- Scene: 2 workers in uniform (one pulling a pallet jack and loading buckets, one using a tablet), plus a passer-by
-  at the frame edge near the end.
+- Videos in `data/` are named `videoN.mp4` (`tools/rename_videos.py`); original names are in `videos.csv`.
+- `video1.mp4`: factory floor, fixed CCTV, 1920x1080, **6 fps**, 17 s, ~9 workers in hi-vis at packing tables,
+  small/far (40-60 px). Fine hand work seen from behind gives ~zero motion signal: motion rules under-count work.
+- `video2.mp4`: parcel-sorting room, fixed CCTV, 640x360, 25 fps, 17.5 min, desk workers at computers + people
+  walking between bins. Low-res: weak detections (conf 0.2-0.5), seated people missed, a blue sack pile on the left
+  is sometimes detected as a person. Labelled 0-188 s only.
+- `video3.mp4` (3840x2160) and `video4.mp4` (426x240): the **same 17.1 s warehouse clip** from a **moving** overhead
+  camera (use `configs/moving_camera.yaml`); 240p is too low (tracks fragment). 2 workers + a passer-by.
+- Labels exist for video1 and video2.
 
 ## Scope
 - Individual workers are tracked by ID only (no identity recognition).
